@@ -33,17 +33,35 @@
             // connection mgmt
             serverWsUrl: null,
             reconnectAttempts: 0,
-            reconnectTimerId: null
+            reconnectTimerId: null,
+            connectionTimeoutId: null,
+            connecting: false,
+            lastError: null,
+            creatingRoom: false,
+            lastActionError: null,
+            creationTimeoutId: null
         };
 
         // --- Helpers ---
         const byId = (id) => document.getElementById(id);
 
         const computeDefaultWsUrl = () => {
-            // If opened as a local file or no host detected -> default to localhost:8080
-            if (location.protocol === 'file:' || !location.host) return 'ws://localhost:8080';
-            const proto = location.protocol === 'https:' ? 'wss://' : 'ws://';
-            return proto + location.host;
+            // Check URL parameter ?server=wss://example.com
+            const params = new URLSearchParams(location.search);
+            const serverParam = params.get('server');
+            if (serverParam && serverParam.startsWith('ws')) {
+                return serverParam.trim();
+            }
+            
+            // Default to public Render server for most cases (except local file)
+            if (location.protocol === 'file:' && !location.host) {
+                // Local file opened directly - default to localhost for testing
+                return 'ws://localhost:8080';
+            }
+            
+            // For HTTPS sites (GitHub Pages, Netlify, etc.) or any web deployment
+            // use the public Render server
+            return 'wss://test-pul.onrender.com';
         };
         const wsUrl = () => gameState.serverWsUrl || localStorage.getItem('resistanceServerWsUrl') || computeDefaultWsUrl();
 
@@ -57,7 +75,18 @@
         };
         const sendWS = (payload) => {
             if (gameState.ws && gameState.ws.readyState === WebSocket.OPEN) {
-                gameState.ws.send(JSON.stringify(payload));
+                try {
+                    gameState.ws.send(JSON.stringify(payload));
+                    console.log('Отправлено сообщение:', payload.type, payload);
+                } catch (e) {
+                    console.error('Ошибка отправки сообщения:', e);
+                    gameState.lastError = 'Ошибка отправки данных. Соединение может быть разорвано.';
+                    renderApp();
+                }
+            } else {
+                console.error('WebSocket не подключен, состояние:', gameState.ws?.readyState);
+                gameState.lastError = 'Соединение с сервером отсутствует.';
+                renderApp();
             }
         };
         const sendAction = (name, extra = {}) => sendWS({ type: 'action', action: { name, ...extra } });
@@ -73,6 +102,8 @@
 
             if (savedUser) {
                 gameState.user = JSON.parse(savedUser);
+                // Если есть сохранённый пользователь, показываем лобби, но если соединения нет,
+                // пользователь увидит предупреждение и сможет выйти или попробовать подключиться.
                 gameState.currentView = 'lobby';
                 connectWS();
             } else {
@@ -90,27 +121,57 @@
         function connectWS() {
             try { if (gameState.ws) { try { gameState.ws.close(); } catch {} } } catch {}
             if (gameState.reconnectTimerId) { clearTimeout(gameState.reconnectTimerId); gameState.reconnectTimerId = null; }
+            if (gameState.connectionTimeoutId) { clearTimeout(gameState.connectionTimeoutId); gameState.connectionTimeoutId = null; }
+            if (gameState.creationTimeoutId) { clearTimeout(gameState.creationTimeoutId); gameState.creationTimeoutId = null; }
 
             let url = wsUrl();
             console.log('Попытка подключения к WebSocket:', url);
+            gameState.connecting = true;
+            gameState.wsConnected = false;
+            gameState.lastError = null;
+            gameState.creatingRoom = false;
+            gameState.lastActionError = null;
+            renderApp();
+            
             try {
                 gameState.ws = new WebSocket(url);
             } catch (e) {
                 console.error('Ошибка создания WebSocket:', e.message);
                 gameState.wsConnected = false;
+                gameState.connecting = false;
+                gameState.lastError = `Ошибка создания WebSocket: ${e.message}`;
                 scheduleReconnect();
                 renderApp();
                 return;
             }
 
-            gameState.wsConnected = false;
-            renderApp();
+            // Таймаут подключения (10 секунд)
+            gameState.connectionTimeoutId = setTimeout(() => {
+                if (!gameState.wsConnected && gameState.connecting) {
+                    console.error('Таймаут подключения WebSocket');
+                    gameState.ws.close();
+                    gameState.wsConnected = false;
+                    gameState.connecting = false;
+                    gameState.lastError = 'Таймаут подключения. Сервер не отвечает.';
+                    scheduleReconnect();
+                    renderApp();
+                }
+            }, 10000);
 
             gameState.ws.onopen = () => {
                 console.log('WebSocket подключение установлено');
+                if (gameState.connectionTimeoutId) {
+                    clearTimeout(gameState.connectionTimeoutId);
+                    gameState.connectionTimeoutId = null;
+                }
                 gameState.wsConnected = true;
+                gameState.connecting = false;
+                gameState.lastError = null;
                 gameState.reconnectAttempts = 0;
-                if (gameState.reconnectTimerId) { clearTimeout(gameState.reconnectTimerId); gameState.reconnectTimerId = null; }
+                if (gameState.reconnectTimerId) { 
+                    clearTimeout(gameState.reconnectTimerId); 
+                    gameState.reconnectTimerId = null; 
+                }
                 if (gameState.user) {
                     sendWS({ type: 'hello', userId: gameState.user.id, name: gameState.user.name });
                     sendWS({ type: 'getLobby' });
@@ -127,8 +188,28 @@
                 renderApp();
             };
             gameState.ws.onmessage = (e) => handleServerMessage(e.data);
-            gameState.ws.onclose = () => { console.log('WebSocket соединение закрыто'); gameState.wsConnected = false; renderApp(); scheduleReconnect(); };
-            gameState.ws.onerror = (err) => { console.error('WebSocket ошибка:', err); gameState.wsConnected = false; renderApp(); };
+            gameState.ws.onclose = () => { 
+                console.log('WebSocket соединение закрыто');
+                if (gameState.connectionTimeoutId) {
+                    clearTimeout(gameState.connectionTimeoutId);
+                    gameState.connectionTimeoutId = null;
+                }
+                gameState.wsConnected = false; 
+                gameState.connecting = false;
+                renderApp(); 
+                scheduleReconnect(); 
+            };
+            gameState.ws.onerror = (err) => { 
+                console.error('WebSocket ошибка:', err); 
+                if (gameState.connectionTimeoutId) {
+                    clearTimeout(gameState.connectionTimeoutId);
+                    gameState.connectionTimeoutId = null;
+                }
+                gameState.wsConnected = false; 
+                gameState.connecting = false;
+                gameState.lastError = 'Не удалось подключиться к серверу. Проверьте адрес и запущен ли сервер.';
+                renderApp(); 
+            };
         }
 
         function scheduleReconnect() {
@@ -144,6 +225,8 @@
 
         function handleServerMessage(raw) {
             let data; try { data = JSON.parse(raw); } catch { return; }
+            console.log('Получено от сервера:', data.type, data);
+            
             if (data.type === 'lobby') {
                 gameState.rooms = (data.rooms || []).map(r => ({
                     id: r.id, name: r.name, host: r.host, hostId: r.hostId,
@@ -162,6 +245,12 @@
                     inviteKey: r.inviteKey || null,
                     playersList: (data.players || []).map(p => ({ id: p.id, name: p.name }))
                 };
+                gameState.creatingRoom = false;
+                gameState.lastActionError = null;
+                if (gameState.creationTimeoutId) {
+                    clearTimeout(gameState.creationTimeoutId);
+                    gameState.creationTimeoutId = null;
+                }
                 if (gameState.currentView !== 'game') gameState.currentView = 'game-room';
                 renderApp();
                 return;
@@ -169,6 +258,8 @@
             if (data.type === 'game') {
                 gameState.gameData = data.game || null;
                 gameState.spiesList = data.spies || [];
+                gameState.creatingRoom = false;
+                gameState.lastActionError = null;
                 if (gameState.currentView !== 'game') gameState.currentView = 'game';
                 renderApp();
                 return;
@@ -178,7 +269,14 @@
                 return;
             }
             if (data.type === 'error') {
+                gameState.creatingRoom = false;
+                gameState.lastActionError = data.message || 'Ошибка';
+                if (gameState.creationTimeoutId) {
+                    clearTimeout(gameState.creationTimeoutId);
+                    gameState.creationTimeoutId = null;
+                }
                 alert(data.message || 'Ошибка');
+                renderApp();
                 return;
             }
         }
@@ -198,12 +296,32 @@
 
         function connectionControlsInline() {
             const connected = gameState.wsConnected;
+            const connecting = gameState.connecting;
             const url = wsUrl();
+            let statusText = '';
+            let statusClass = '';
+            let statusIcon = '';
+            
+            if (connecting) {
+                statusText = 'Подключение...';
+                statusClass = 'bg-yellow-700 text-yellow-200';
+                statusIcon = 'fa-spinner fa-spin';
+            } else if (connected) {
+                statusText = 'Подключено';
+                statusClass = 'bg-green-700 text-green-200';
+                statusIcon = 'fa-circle-check';
+            } else {
+                statusText = 'Нет соединения';
+                statusClass = 'bg-red-700 text-red-200';
+                statusIcon = 'fa-circle-xmark';
+            }
+            
             return `
-                <div class="flex items-center space-x-2">
-                    <span class="inline-flex items-center text-xs px-2 py-1 rounded-full ${connected ? 'bg-green-700 text-green-200' : 'bg-red-700 text-red-200'}">
-                        <i class="fas ${connected ? 'fa-circle-check' : 'fa-circle-xmark'} mr-1"></i>${connected ? 'Подключено' : 'Нет соединения'}
+                <div class="flex flex-wrap items-center gap-2">
+                    <span class="inline-flex items-center text-xs px-2 py-1 rounded-full ${statusClass}">
+                        <i class="fas ${statusIcon} mr-1"></i>${statusText}
                     </span>
+                    ${gameState.reconnectAttempts > 0 ? `<span class="text-xs text-gray-400">Попытка ${gameState.reconnectAttempts}</span>` : ''}
                     <span class="text-xs text-gray-400 truncate max-w-[200px]" title="${url}"><i class="fas fa-plug mr-1"></i>${url}</span>
                     <button onclick="reconnectNow()" class="text-xs bg-gray-700 hover:bg-gray-600 border border-gray-600 px-2 py-1 rounded"><i class="fas fa-rotate mr-1"></i>Подключиться</button>
                     <button onclick="promptServerUrl()" class="text-xs bg-gray-700 hover:bg-gray-600 border border-gray-600 px-2 py-1 rounded"><i class="fas fa-gear mr-1"></i>Настройки</button>
@@ -228,15 +346,42 @@
                                 <i class="fas fa-server text-red-400 text-xl mr-3"></i>
                                 <h3 class="text-lg font-bold text-white">Сервер не подключен</h3>
                             </div>
+                            ${gameState.lastError ? `<div class="mb-3 p-3 bg-red-900/50 border border-red-800 rounded"><p class="text-red-200 text-sm"><i class="fas fa-exclamation-triangle mr-2"></i>${gameState.lastError}</p></div>` : ''}
                             <p class="text-gray-300 text-sm mb-3">Для игры необходимо запустить сервер на вашем компьютере или подключиться к существующему серверу.</p>
-                            <div class="space-y-2">
-                                <p class="text-gray-400 text-sm"><i class="fas fa-terminal mr-2"></i>Чтобы запустить сервер, выполните в терминале:</p>
-                                <div class="bg-gray-900 border border-gray-700 rounded p-3 font-mono text-sm">
-                                    npm install<br>
-                                    npm start
+                            <div class="space-y-4">
+                                <div>
+                                    <p class="text-gray-400 text-sm"><i class="fas fa-terminal mr-2"></i>Чтобы запустить сервер, выполните в терминале:</p>
+                                    <div class="bg-gray-900 border border-gray-700 rounded p-3 font-mono text-sm">
+                                        npm install<br>
+                                        npm start
+                                    </div>
                                 </div>
-                                <p class="text-gray-400 text-sm"><i class="fas fa-plug mr-2"></i>Сервер будет доступен по адресу: <span class="font-mono text-blue-300">ws://localhost:8080</span></p>
-                                <p class="text-gray-400 text-sm">Если сервер уже запущен на другом адресе, нажмите кнопку <strong>Настройки</strong> выше и укажите правильный адрес.</p>
+                                <div>
+                                    <p class="text-gray-400 text-sm"><i class="fas fa-plug mr-2"></i>Для локального тестирования: <span class="font-mono text-blue-300">ws://localhost:8080</span></p>
+                                    <p class="text-gray-400 text-sm">Для игры с друзьями используйте публичный сервер: <span class="font-mono text-green-300">wss://test-pul.onrender.com</span></p>
+                                    <p class="text-gray-400 text-sm mt-1"><i class="fas fa-info-circle mr-1"></i>Публичный сервер на Render.com может просыпаться до 1 минуты при первом подключении.</p>
+                                    <p class="text-gray-400 text-sm">Вы можете указать адрес сервера в настройках выше или добавить параметр в URL: <code class="font-mono text-yellow-300">?server=wss://ваш-сервер</code></p>
+                                    <p class="text-gray-400 text-sm">Если открываете с GitHub Pages, автоматически будет использован адрес <span class="font-mono text-green-300">wss://test-pul.onrender.com</span></p>
+                                </div>
+                                <div>
+                                    <p class="text-gray-400 text-sm"><i class="fas fa-question-circle mr-2"></i>Возможные причины проблемы:</p>
+                                    <ul class="text-gray-400 text-sm list-disc list-inside ml-4 mt-1 space-y-1">
+                                        <li>Сервер не запущен — проверьте, выполнили ли вы команду <code class="bg-gray-800 px-1 rounded">npm start</code></li>
+                                        <li>Порт 8080 занят другой программой — попробуйте изменить порт в настройках сервера</li>
+                                        <li>Брандмауэр блокирует подключение — разрешите подключения на порту 8080</li>
+                                        <li>Не установлены зависимости — выполните <code class="bg-gray-800 px-1 rounded">npm install</code></li>
+                                        <li>Вы используете неверный адрес сервера — проверьте настройки подключения</li>
+                                        <li>Публичный сервер спит — подождите до 1 минуты и повторите попытку</li>
+                                    </ul>
+                                </div>
+                                <div class="pt-2 flex space-x-3">
+                                    <button onclick="reconnectNow()" class="flex-1 bg-gradient-to-r from-blue-600 to-indigo-700 hover:from-blue-700 hover:to-indigo-800 text-white font-semibold py-2 px-4 rounded-lg transition">
+                                        <i class="fas fa-redo mr-2"></i>Повторить попытку подключения
+                                    </button>
+                                    <button onclick="promptServerUrl()" class="flex-1 bg-gradient-to-r from-gray-600 to-gray-700 hover:from-gray-700 hover:to-gray-800 text-white font-semibold py-2 px-4 rounded-lg transition">
+                                        <i class="fas fa-gear mr-2"></i>Настройки сервера
+                                    </button>
+                                </div>
                             </div>
                         </div>
                     ` : ''}
@@ -253,6 +398,9 @@
                     <button onclick="handleLogin()" class="w-full bg-gradient-to-r from-blue-600 to-indigo-700 hover:from-blue-700 hover:to-indigo-800 text-white font-semibold py-3 px-4 rounded-lg transition">
                         <i class="fas fa-sign-in-alt mr-2"></i>Войти в игру
                     </button>
+                    <div class="mt-6 pt-6 border-t border-gray-700 text-center">
+                        <p class="text-gray-400 text-sm">Нужна помощь? <a href="javascript:void(0);" onclick="showHelp()" class="text-blue-400 hover:text-blue-300 underline">Инструкция по запуску</a></p>
+                    </div>
                 </div>
             `;
         }
@@ -289,6 +437,32 @@
                             </div>
                         </div>
                     </div>
+                    ${!gameState.wsConnected ? `
+                        <div class="mb-6 bg-gradient-to-r from-red-900/40 to-red-800/30 border border-red-700 rounded-xl p-6">
+                            <div class="flex items-center mb-2">
+                                <i class="fas fa-server text-red-400 text-xl mr-3"></i>
+                                <h3 class="text-lg font-bold text-white">Сервер не подключен</h3>
+                            </div>
+                            ${gameState.lastError ? `<div class="mb-3 p-3 bg-red-900/50 border border-red-800 rounded"><p class="text-red-200 text-sm"><i class="fas fa-exclamation-triangle mr-2"></i>${gameState.lastError}</p></div>` : ''}
+                            <p class="text-gray-300 text-sm mb-3">Для создания комнаты и игры необходимо подключиться к серверу.</p>
+                            <div class="space-y-4">
+                                <div>
+                                    <p class="text-gray-400 text-sm"><i class="fas fa-plug mr-2"></i>Текущий адрес сервера: <span class="font-mono text-blue-300">${wsUrl()}</span></p>
+                                    <p class="text-gray-400 text-sm">Для локального тестирования используйте <span class="font-mono text-green-300">ws://localhost:8080</span></p>
+                                    <p class="text-gray-400 text-sm">Для игры с друзьями используйте публичный сервер: <span class="font-mono text-green-300">wss://test-pul.onrender.com</span></p>
+                                    <p class="text-gray-400 text-sm mt-1"><i class="fas fa-info-circle mr-1"></i>Публичный сервер на Render.com может просыпаться до 1 минуты при первом подключении.</p>
+                                </div>
+                                <div class="pt-2 flex space-x-3">
+                                    <button onclick="reconnectNow()" class="flex-1 bg-gradient-to-r from-blue-600 to-indigo-700 hover:from-blue-700 hover:to-indigo-800 text-white font-semibold py-2 px-4 rounded-lg transition">
+                                        <i class="fas fa-redo mr-2"></i>Повторить попытку подключения
+                                    </button>
+                                    <button onclick="promptServerUrl()" class="flex-1 bg-gradient-to-r from-gray-600 to-gray-700 hover:from-gray-700 hover:to-gray-800 text-white font-semibold py-2 px-4 rounded-lg transition">
+                                        <i class="fas fa-gear mr-2"></i>Настройки сервера
+                                    </button>
+                                </div>
+                            </div>
+                        </div>
+                    ` : ''}
 
                     <div id="createRoomCard" class="bg-gradient-to-br from-gray-800 to-gray-900 border border-gray-700 rounded-xl p-6 shadow-lg mb-6 hidden">
                         <h3 class="text-xl font-bold text-green-400 mb-4">Создать новую игру</h3>
@@ -308,9 +482,18 @@
                             </label>
                             <input type="password" id="roomPassword" class="w-full mt-2 px-4 py-2 bg-gray-700 border border-gray-600 rounded-lg hidden" placeholder="Введите пароль">
                         </div>
-                        <button onclick="createRoomFromForm()" class="w-full bg-gradient-to-r from-green-600 to-emerald-700 hover:from-green-700 hover:to-emerald-800 text-white font-semibold py-3 px-4 rounded-lg transition">
-                            <i class="fas fa-gamepad mr-2"></i>Создать игровую комнату
+                        <button onclick="createRoomFromForm()" ${gameState.creatingRoom ? 'disabled' : ''} class="w-full bg-gradient-to-r from-green-600 to-emerald-700 hover:from-green-700 hover:to-emerald-800 text-white font-semibold py-3 px-4 rounded-lg transition flex items-center justify-center ${gameState.creatingRoom ? 'opacity-75 cursor-not-allowed' : ''}">
+                            ${gameState.creatingRoom ? `
+                                <i class="fas fa-spinner fa-spin mr-2"></i>Создание комнаты...
+                            ` : `
+                                <i class="fas fa-gamepad mr-2"></i>Создать игровую комнату
+                            `}
                         </button>
+                        ${gameState.lastActionError ? `
+                            <div class="mt-4 p-3 bg-red-900/50 border border-red-700 rounded">
+                                <p class="text-red-200 text-sm"><i class="fas fa-exclamation-triangle mr-2"></i>${gameState.lastActionError}</p>
+                            </div>
+                        ` : ''}
                     </div>
 
                     <div class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
@@ -362,12 +545,46 @@
         }
 
         function createRoomFromForm() {
-            if (!gameState.wsConnected) { alert('Нет соединения с сервером'); return; }
+            if (!gameState.wsConnected) { 
+                alert('Нет соединения с сервером'); 
+                return; 
+            }
+            if (gameState.creatingRoom) return;
+            
             const playerCount = parseInt(byId('playerCount').value);
             const usePassword = byId('usePassword').checked;
             const password = byId('roomPassword').value;
-            if (usePassword && !password) { alert('Пожалуйста, введите пароль для комнаты'); return; }
-            sendWS({ type: 'createRoom', name: `Игра ${gameState.user.name}`, maxPlayers: playerCount, password: usePassword ? password : null });
+            if (usePassword && !password) { 
+                alert('Пожалуйста, введите пароль для комнаты'); 
+                return; 
+            }
+            
+            gameState.creatingRoom = true;
+            gameState.lastActionError = null;
+            if (gameState.creationTimeoutId) {
+                clearTimeout(gameState.creationTimeoutId);
+                gameState.creationTimeoutId = null;
+            }
+            renderApp();
+            
+            console.log('Создание комнаты:', { maxPlayers: playerCount, hasPassword: usePassword });
+            sendWS({ 
+                type: 'createRoom', 
+                name: `Игра ${gameState.user.name}`, 
+                maxPlayers: playerCount, 
+                password: usePassword ? password : null 
+            });
+            
+            // Таймаут на случай, если ответ не придет
+            gameState.creationTimeoutId = setTimeout(() => {
+                if (gameState.creatingRoom) {
+                    gameState.creatingRoom = false;
+                    gameState.creationTimeoutId = null;
+                    gameState.lastActionError = 'Не удалось создать комнату. Сервер не ответил.';
+                    renderApp();
+                    alert('Сервер не ответил. Проверьте подключение и повторите попытку.');
+                }
+            }, 10000);
         }
 
         function joinRoom(roomId) { if (!gameState.wsConnected) { alert('Нет соединения с сервером'); return; } sendWS({ type: 'joinRoom', roomId }); }
@@ -854,6 +1071,37 @@
             }
         }
         function reconnectNow(){ connectWS(); }
+        
+        function showHelp() {
+            alert(`ПОШАГОВАЯ ИНСТРУКЦИЯ ПО ЗАПУСКУ:
+
+1. ДЛЯ ЛОКАЛЬНОГО ТЕСТИРОВАНИЯ:
+   - Установите Node.js с сайта nodejs.org (версия 14 или выше)
+   - Откройте терминал в папке с игрой
+   - Выполните команды:
+     npm install
+     npm start
+   - После запуска сервера откройте браузер по адресу:
+     http://localhost:8080
+
+2. ДЛЯ ИГРЫ С ДРУЗЬЯМИ ЧЕРЕЗ ИНТЕРНЕТ:
+   - Используйте публичный сервер: wss://test-pul.onrender.com
+   - Откройте файл index.html на любом хостинге (GitHub Pages, Netlify и т.д.)
+   - Нажмите кнопку "Настройки" и введите адрес сервера
+   - ИЛИ добавьте параметр в URL:
+     ?server=wss://test-pul.onrender.com
+
+3. ПРИ ОТКРЫТИИ С GITHUB PAGES:
+   - Адрес сервера автоматически установится на wss://test-pul.onrender.com
+   - Просто создайте комнату и пригласите друзей по ссылке
+
+4. ЕСЛИ СЕРВЕР НЕ ЗАПУСКАЕТСЯ:
+   - Проверьте, что порт 8080 не занят: PORT=8081 npm start
+   - Проверьте брандмауэр и разрешите подключения
+   - Убедитесь, что зависимости установлены: npm install
+
+Подробная инструкция в файле README.md`);
+        }
 
         // --- Utils ---
         function getSpyCount(pc){ pc=parseInt(pc); if(pc===5) return 2; if(pc===6) return 2; if(pc===7) return 3; if(pc===8) return 3; if(pc===9) return 3; return 2; }
