@@ -39,7 +39,8 @@
             lastError: null,
             creatingRoom: false,
             lastActionError: null,
-            creationTimeoutId: null
+            creationTimeoutId: null,
+            showCreateRoomForm: false // UI state
         };
 
         // --- Helpers ---
@@ -226,7 +227,7 @@
                     players: r.players, maxPlayers: r.maxPlayers,
                     hasPassword: !!r.hasPassword
                 }));
-                if (gameState.currentView === 'login') gameState.currentView = 'lobby';
+                // Не переключаем автоматически вид с login на lobby, давая пользователю время изменить имя
                 renderApp();
                 return;
             }
@@ -476,7 +477,7 @@
                         </div>
                     ` : ''}
 
-                    <div id="createRoomCard" class="bg-gradient-to-br from-gray-800 to-gray-900 border border-gray-700 rounded-xl p-6 shadow-lg mb-6 hidden">
+                    <div id="createRoomCard" class="bg-gradient-to-br from-gray-800 to-gray-900 border border-gray-700 rounded-xl p-6 shadow-lg mb-6 ${gameState.showCreateRoomForm ? '' : 'hidden'}">
                         <div class="flex justify-between items-center mb-4">
                             <h3 class="text-xl font-bold text-green-400">Создать новую игру</h3>
                             <button onclick="hideCreateRoomForm()" class="text-gray-400 hover:text-white">
@@ -500,7 +501,7 @@
                         </div>
                         <div class="mb-6">
                             <label class="flex items-center text-gray-300">
-                                <input type="checkbox" id="usePassword" class="mr-2 h-5 w-5 text-green-500 rounded">Защитить паролем
+                                <input type="checkbox" id="usePassword" class="mr-2 h-5 w-5 text-green-500 rounded" onchange="togglePasswordInput(this)">Защитить паролем
                             </label>
                             <input type="password" id="roomPassword" class="w-full mt-2 px-4 py-2 bg-gray-700 border border-gray-600 rounded-lg hidden" placeholder="Введите пароль">
                         </div>
@@ -566,13 +567,19 @@
                 alert('Дождитесь подключения к серверу');
                 return;
             }
-            const card = byId('createRoomCard');
-            if (card) card.classList.remove('hidden');
+            gameState.showCreateRoomForm = true;
+            renderApp();
         }
         
         function hideCreateRoomForm() {
-            const card = byId('createRoomCard');
-            if (card) card.classList.add('hidden');
+            gameState.showCreateRoomForm = false;
+            renderApp();
+        }
+
+        function togglePasswordInput(checkbox) {
+            const pf = byId('roomPassword');
+            if (!pf) return;
+            if (checkbox.checked) { pf.classList.remove('hidden'); pf.focus(); } else { pf.classList.add('hidden'); }
         }
 
         function createRoomFromForm() {
@@ -1130,9 +1137,22 @@
         // Connection utilities
         function promptServerUrl(){
             const current = wsUrl();
-            const input = prompt('Укажите адрес WebSocket сервера (ws:// или wss://):', current);
+            const input = prompt('Укажите адрес WebSocket сервера:', current);
             if (input && typeof input === 'string') {
-                const trimmed = input.trim();
+                let trimmed = input.trim();
+                if (trimmed.startsWith('https://')) {
+                    trimmed = trimmed.replace('https://', 'wss://');
+                } else if (trimmed.startsWith('http://')) {
+                    trimmed = trimmed.replace('http://', 'ws://');
+                } else if (!trimmed.startsWith('ws://') && !trimmed.startsWith('wss://')) {
+                    // Try to guess protocol based on hostname or default to wss
+                    if (trimmed.includes('localhost') || trimmed.includes('127.0.0.1')) {
+                        trimmed = 'ws://' + trimmed;
+                    } else {
+                        trimmed = 'wss://' + trimmed;
+                    }
+                }
+                
                 localStorage.setItem('resistanceServerWsUrl', trimmed);
                 gameState.serverWsUrl = trimmed;
                 connectWS();
@@ -1176,13 +1196,7 @@
         function getSpyCount(pc){ pc=parseInt(pc); if(pc===5) return 2; if(pc===6) return 2; if(pc===7) return 3; if(pc===8) return 3; if(pc===9) return 3; return 2; }
         function getResistanceCount(pc){ return pc - getSpyCount(pc); }
 
-        // Password field toggle
-        document.addEventListener('change', (e)=>{
-            if (e.target && e.target.id==='usePassword') {
-                const pf = byId('roomPassword'); if (!pf) return;
-                if (e.target.checked) { pf.classList.remove('hidden'); pf.focus(); } else { pf.classList.add('hidden'); }
-            }
-        });
+
     </script>
 </body>
 </html>
