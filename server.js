@@ -127,6 +127,7 @@ function initGame(room) {
     failedMissions: 0,
     currentLeaderIndex: startingIndex,
     currentPlayerIndex: startingIndex,
+    discussionTurnCount: 0, // Счетчик высказываний в текущем раунде
     phase: 'discussion',
     discussionTimeLeft: 40,
     nominationTimeLeft: 80,
@@ -273,8 +274,25 @@ wss.on('connection', (ws) => {
       // Handle various actions similar to client offline logic
       const a = data.action;
 
-      if (a.name === 'sendDiscussionMessage') {
-        broadcastToRoom(room.id, { type: 'chat', from: me.name, message: a.message?.slice(0, 500) || '' });
+      if (a.name === 'passTurn') {
+        // Разрешаем пропуск хода текущему игроку ИЛИ хосту
+        const isCurrentPlayer = game.players[game.currentPlayerIndex].id === user.id;
+        const isHost = room.hostId === user.id;
+        
+        if (isCurrentPlayer || isHost) {
+           game.discussionTurnCount = (game.discussionTurnCount || 0) + 1;
+           
+           // Если все игроки высказались (круг завершен)
+           if (game.discussionTurnCount >= game.players.length) {
+             game.phase = 'voting';
+             broadcastToRoom(room.id, { type: 'game', game });
+           } else {
+             // Переход к следующему игроку
+             game.currentPlayerIndex = (game.currentPlayerIndex + 1) % game.players.length;
+             game.discussionTimeLeft = 40;
+             broadcastToRoom(room.id, { type: 'game', game });
+           }
+        }
         return;
       }
 
@@ -444,6 +462,7 @@ wss.on('connection', (ws) => {
         game.players[nextIndex].isLeader = true;
         game.currentLeaderIndex = nextIndex;
         game.currentPlayerIndex = nextIndex; // discussion starts with leader
+        game.discussionTurnCount = 0;
         game.phase = 'discussion';
         game.discussionTimeLeft = 40;
         broadcastToRoom(room.id, { type: 'game', game });
