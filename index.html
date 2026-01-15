@@ -796,6 +796,7 @@
             let phaseContent = '';
             switch (game.phase) {
                 case 'discussion': phaseContent = renderDiscussionPhase(game, currentPlayer, isLeader); break;
+                case 'leaderDiscussion': phaseContent = renderDiscussionPhase(game, currentPlayer, isLeader); break;
                 case 'nomination': phaseContent = renderNominationPhase(game, currentPlayer, isLeader); break;
                 case 'voting': phaseContent = renderVotingPhase(game, currentPlayer, isLeader); break;
                 case 'leaderSelection': phaseContent = renderLeaderSelectionPhase(game, currentPlayer, isLeader); break;
@@ -875,6 +876,8 @@
         function renderDiscussionPhase(game, currentPlayer, isLeader){
             const isCurrentPlayer = currentPlayer?.id === gameState.user.id;
             const isHost = gameState.currentRoom?.hostId === gameState.user.id;
+            const isLeaderDiscussion = game.phase === 'leaderDiscussion';
+            const actionName = isLeaderDiscussion ? 'passTurnLeaderDiscussion' : 'passTurn';
             
             // Определяем, можно ли завершить ход (текущий игрок или хост)
             const canPassTurn = isCurrentPlayer || isHost;
@@ -882,7 +885,7 @@
             return `
                 <div class="bg-gradient-to-br from-gray-800 to-gray-900 border border-gray-700 rounded-xl p-6 shadow-lg mb-6">
                     <div class="flex justify-between items-start mb-6">
-                        <h2 class="text-2xl font-bold text-blue-400">Обсуждение</h2>
+                        <h2 class="text-2xl font-bold text-blue-400">${isLeaderDiscussion ? 'Обсуждение команды' : 'Обсуждение'}</h2>
                         <div class="text-right">
                              <div class="bg-gray-900 rounded-lg px-3 py-2 inline-block">
                                 <span class="text-gray-400 text-xs uppercase block">Таймер</span>
@@ -901,7 +904,7 @@
                                 <p class="text-blue-300 mb-6 font-medium">${isCurrentPlayer ? 'ВАШ ХОД! Выскажите свои мысли.' : 'Слушайте игрока'}</p>
                                 
                                 ${canPassTurn ? `
-                                    <button onclick="passTurn()" class="bg-gradient-to-r from-blue-600 to-indigo-700 hover:from-blue-700 hover:to-indigo-800 text-white font-semibold py-3 px-8 rounded-full transition transform hover:scale-105 shadow-lg flex items-center">
+                                    <button onclick="sendAction('${actionName}')" class="bg-gradient-to-r from-blue-600 to-indigo-700 hover:from-blue-700 hover:to-indigo-800 text-white font-semibold py-3 px-8 rounded-full transition transform hover:scale-105 shadow-lg flex items-center">
                                         <i class="fas fa-step-forward mr-2"></i>Завершить ход
                                     </button>
                                     ${isHost && !isCurrentPlayer ? '<p class="text-xs text-gray-500 mt-2">(Как создатель комнаты вы можете пропустить ход)</p>' : ''}
@@ -1083,27 +1086,49 @@
         function renderGameSidebar(game, me, isSpy, isLeader){
             const spyPlayers = isSpy ? (gameState.spiesList || []) : [];
             const userSpyNumber = me.spyNumber;
+            const roleName = isSpy ? 'Шпион' : 'Сопротивление';
+            const roleColor = isSpy ? 'text-red-400' : 'text-green-400';
+            const roleIcon = isSpy ? 'fa-user-secret' : 'fa-users';
+            const roleBg = isSpy ? 'from-red-500 to-red-600' : 'from-green-500 to-emerald-600';
+            
             return `
                 <div class="space-y-6">
                     <div class="bg-gradient-to-br from-gray-800 to-gray-900 border border-gray-700 rounded-xl p-6 shadow-lg">
                         <h2 class="text-xl font-bold text-white mb-4">Ваша роль</h2>
-                        <div class="role-card ${isSpy?'flipped':''}" onclick="toggleRoleCard()">
+                        <div class="role-card cursor-pointer group" onclick="this.classList.toggle('flipped')">
                             <div class="role-card-inner">
-                                <div class="role-card-front flex items-center justify-center p-6 text-center">
+                                <!-- Front (Cover) -->
+                                <div class="role-card-front flex items-center justify-center p-6 text-center bg-gray-800 border-2 border-gray-600 rounded-xl">
                                     <div>
-                                        <div class="w-20 h-20 rounded-full bg-gradient-to-r from-green-500 to-emerald-600 flex items-center justify-center text-white font-bold text-2xl mb-4"><i class="fas fa-users"></i></div>
-                                        <h3 class="text-2xl font-bold text-green-400 mb-2">Сопротивление</h3>
-                                        <p class="text-gray-300">Выполните 3 миссии успешно</p>
-                                        <p class="text-gray-400 text-sm mt-4"><i class="fas fa-sync-alt mr-1"></i>Нажмите, чтобы раскрыть роль</p>
+                                        <div class="w-20 h-20 rounded-full bg-gray-700 flex items-center justify-center text-gray-400 text-3xl mb-4 mx-auto group-hover:scale-110 transition-transform">
+                                            <i class="fas fa-question"></i>
+                                        </div>
+                                        <h3 class="text-xl font-bold text-white mb-2">Ваша роль скрыта</h3>
+                                        <p class="text-gray-400 text-sm">Нажмите на карточку, чтобы увидеть свою роль</p>
                                     </div>
                                 </div>
-                                <div class="role-card-back flex items-center justify-center p-6 text-center">
-                                    <div>
-                                        <div class="w-20 h-20 rounded-full bg-gradient-to-r from-red-500 to-red-600 flex items-center justify-center text-white font-bold text-2xl mb-4"><i class="fas fa-user-secret"></i></div>
-                                        <h3 class="text-2xl font-bold text-red-400 mb-2">Шпион №${userSpyNumber || '?'}</h3>
-                                        <p class="text-gray-300">Провалите 3 миссии</p>
-                                        ${spyPlayers.length>1?`<div class="mt-4 pt-4 border-t border-gray-700 w-full"><h4 class="text-white font-semibold mb-2">Другие шпионы:</h4>${spyPlayers.filter(s=>s.id!==me.id).map(s=>`<div class=\"flex items-center mb-2\"><div class=\"w-8 h-8 rounded-full bg-red-700 flex items-center justify-center text-white text-sm font-bold mr-2\">${s.spyNumber}</div><span class=\"text-white\">${s.name}</span></div>`).join('')}</div>`:`<p class="text-gray-400 text-sm mt-4">Вы единственный шпион</p>`}
-                                        <p class="text-gray-400 text-sm mt-4"><i class="fas fa-sync-alt mr-1"></i>Нажмите, чтобы скрыть роль</p>
+                                <!-- Back (Reveal) -->
+                                <div class="role-card-back flex items-center justify-center p-6 text-center bg-gray-800 border-2 ${isSpy ? 'border-red-900' : 'border-green-900'} rounded-xl">
+                                    <div class="w-full">
+                                        <div class="w-20 h-20 rounded-full bg-gradient-to-r ${roleBg} flex items-center justify-center text-white font-bold text-2xl mb-4 mx-auto">
+                                            <i class="fas ${roleIcon}"></i>
+                                        </div>
+                                        <h3 class="text-2xl font-bold ${roleColor} mb-2">${roleName} ${isSpy ? '№'+(userSpyNumber||'?') : ''}</h3>
+                                        <p class="text-gray-300 mb-4">${isSpy ? 'Провалите 3 миссии' : 'Выполните 3 миссии успешно'}</p>
+                                        
+                                        ${isSpy && spyPlayers.length > 1 ? `
+                                            <div class="mt-4 pt-4 border-t border-gray-700 w-full text-left">
+                                                <p class="text-xs text-gray-500 uppercase font-bold mb-2">Ваши напарники:</p>
+                                                ${spyPlayers.filter(s => s.id !== me.id).map(s => `
+                                                    <div class="flex items-center mb-2 bg-gray-900/50 p-2 rounded">
+                                                        <div class="w-6 h-6 rounded-full bg-red-700 flex items-center justify-center text-white text-xs font-bold mr-2">${s.spyNumber}</div>
+                                                        <span class="text-white text-sm">${s.name}</span>
+                                                    </div>
+                                                `).join('')}
+                                            </div>
+                                        ` : ''}
+                                        
+                                        <p class="text-gray-500 text-xs mt-4"><i class="fas fa-eye-slash mr-1"></i>Нажмите, чтобы скрыть</p>
                                     </div>
                                 </div>
                             </div>

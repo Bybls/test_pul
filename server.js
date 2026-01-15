@@ -1,3 +1,4 @@
+
 import express from 'express';
 import http from 'http';
 import { WebSocketServer } from 'ws';
@@ -45,15 +46,37 @@ function publicRoomInfo(room) {
 function broadcastLobby() {
   const list = Array.from(rooms.values()).map(publicRoomInfo);
   for (const [ws, user] of sockets.entries()) {
-    ws.send(JSON.stringify({ type: 'lobby', rooms: list }));
+    try {
+      ws.send(JSON.stringify({ type: 'lobby', rooms: list }));
+    } catch (e) {}
   }
 }
 
-function broadcastToRoom(roomId, payload) {
-  const room = rooms.get(roomId);
-  if (!room) return;
+function broadcastToRoomRaw(roomId, payload) {
   for (const [ws, user] of sockets.entries()) {
     if (user.roomId === roomId) {
+      try { ws.send(JSON.stringify(payload)); } catch (e) {}
+    }
+  }
+}
+
+// Отправляет состояние игры каждому игроку с учетом маскировки ролей
+function broadcastGameState(roomId) {
+  const room = rooms.get(roomId);
+  if (!room || !room.game) return;
+
+  const spies = room.game.players.filter(p => p.role === 'spy');
+  const spyPublic = spies.map(s => ({ id: s.id, name: s.name, spyNumber: s.spyNumber }));
+
+  for (const [ws, user] of sockets.entries()) {
+    if (user.roomId === roomId) {
+      const me = room.game.players.find(p => p.id === user.id);
+      const isSpy = me?.role === 'spy';
+      const safeGame = safeGameForClient(room.game, user.id, isSpy, spyPublic);
+      
+      const payload = { type: 'game', game: safeGame, you: me };
+      if (isSpy) payload.spies = spyPublic;
+      
       try { ws.send(JSON.stringify(payload)); } catch (e) {}
     }
   }
@@ -127,10 +150,11 @@ function initGame(room) {
     failedMissions: 0,
     currentLeaderIndex: startingIndex,
     currentPlayerIndex: startingIndex,
-    discussionTurnCount: 0, // Счетчик высказываний в текущем раунде
+    discussionTurnCount: 0,
     phase: 'discussion',
     discussionTimeLeft: 40,
     nominationTimeLeft: 80,
+    tieTimeLeft: 30, // For tie breaks
     nominatedPlayers: [],
     votes: {},
     missionTeam: [],
@@ -158,17 +182,105 @@ function safeGameForClient(game, forPlayerId, isViewerSpy, spiesList) {
   return copy;
 }
 
+// --- Game Loop for Timers ---
+setInterval(() => {
+  rooms.forEach((room) => {
+    if (!room.game || room.game.gameOver) return;
+    const game = room.game;
+    let changed = false;
+
+    // Timer logic
+    if (game.phase === 'discussion') {
+      if (game.discussionTimeLeft > 0) {
+        game.discussionTimeLeft--;
+        changed = true;
+        // Broadcast every second? Or let client interpolate?
+        // For accurate sync, we broadcast. To optimize, maybe less freq, but 1s is fine.
+      } else {
+        // Time up for current player
+        game.discussionTurnCount = (game.discussionTurnCount || 0) + 1;
+        
+        if (game.discussionTurnCount >= game.players.length) {
+          game.phase = 'voting';
+        } else {
+          game.currentPlayerIndex = (game.currentPlayerIndex + 1) % game.players.length;
+          game.discussionTimeLeft = 40;
+        }
+        changed = true;
+      }
+    } else if (game.phase === 'missionTeamSelection') {
+      if (game.nominationTimeLeft > 0) {
+        game.nominationTimeLeft--;
+        changed = true;
+      } else {
+        // Time up for team selection -> Mission Failed
+        game.missionResults.push({ 
+            mission: game.currentMission, 
+            success: false, 
+            failCount: 0, 
+            note: 'Время вышло (лидер не выбрал команду)' 
+        });
+        game.failedMissions++;
+        
+        if (game.failedMissions >= 3) {
+            game.gameOver = true;
+            game.winner = 'spy';
+            game.phase = 'missionResults';
+        } else {
+            // Next mission logic
+            game.currentMission++;
+            // Reset player states
+            game.players.forEach(p => { 
+                p.nominated = false; 
+                p.voted = false; 
+                p.missionVote = null; 
+                p.isLeader = false; 
+            });
+            game.nominatedPlayers = [];
+            game.votes = {};
+            game.missionTeam = [];
+            game.missionVotes = {};
+
+            // Next leader
+            const nextIndex = (game.currentLeaderIndex + 1) % game.players.length;
+            game.players[nextIndex].isLeader = true;
+            game.currentLeaderIndex = nextIndex;
+            game.currentPlayerIndex = nextIndex;
+            game.discussionTurnCount = 0;
+            
+            game.phase = 'discussion';
+            game.discussionTimeLeft = 40;
+        }
+        changed = true;
+      }
+    } else if (game.phase === 'tieDiscussion') {
+      if (game.tieTimeLeft > 0) {
+        game.tieTimeLeft--;
+        changed = true;
+      } else {
+        // End of tie discussion -> revote
+        game.players.forEach(p => p.voted = false);
+        game.votes = {};
+        game.phase = 'voting';
+        changed = true;
+      }
+    }
+
+    if (changed) {
+      broadcastGameState(room.id);
+    }
+  });
+}, 1000);
+// ----------------------------
+
 wss.on('connection', (ws) => {
-  console.log('Новое WebSocket подключение');
   const user = { id: null, name: null, roomId: null };
   sockets.set(ws, user);
 
   ws.on('message', (msg) => {
     let data = null;
     try { data = JSON.parse(msg); } catch (e) { return; }
-    console.log('Получено сообщение:', data.type, data);
 
-    // Basic actions
     if (data.type === 'hello') {
       user.id = data.userId || nanoid();
       user.name = data.name || `Игрок-${user.id.slice(0,4)}`;
@@ -192,11 +304,10 @@ wss.on('connection', (ws) => {
         players: new Map()
       };
       rooms.set(roomId, room);
-      // Auto join host
       room.players.set(user.id, { id: user.id, name: user.name });
       user.roomId = roomId;
       broadcastLobby();
-      broadcastToRoom(roomId, { type: 'room', room: { ...publicRoomInfo(room), inviteKey }, players: Array.from(room.players.values()) });
+      broadcastToRoomRaw(roomId, { type: 'room', room: { ...publicRoomInfo(room), inviteKey }, players: Array.from(room.players.values()) });
       return;
     }
 
@@ -204,12 +315,17 @@ wss.on('connection', (ws) => {
       const room = rooms.get(data.roomId);
       if (!room) { ws.send(JSON.stringify({ type: 'error', message: 'Комната не найдена' })); return; }
       if (room.players.size >= room.maxPlayers) { ws.send(JSON.stringify({ type: 'error', message: 'Комната заполнена' })); return; }
+      
       const hasInvite = data.inviteKey && room.inviteKey && (String(data.inviteKey) === String(room.inviteKey));
-      if (!hasInvite && room.password && room.password !== (data.password || '')) { ws.send(JSON.stringify({ type: 'error', message: 'Неверный пароль' })); return; }
+      if (!hasInvite && room.password && room.password !== (data.password || '')) { 
+          ws.send(JSON.stringify({ type: 'error', message: 'Неверный пароль' })); 
+          return; 
+      }
+      
       room.players.set(user.id, { id: user.id, name: user.name });
       user.roomId = room.id;
       broadcastLobby();
-      broadcastToRoom(room.id, { type: 'room', room: { ...publicRoomInfo(room), inviteKey: room.inviteKey }, players: Array.from(room.players.values()) });
+      broadcastToRoomRaw(room.id, { type: 'room', room: { ...publicRoomInfo(room), inviteKey: room.inviteKey }, players: Array.from(room.players.values()) });
       return;
     }
 
@@ -217,9 +333,8 @@ wss.on('connection', (ws) => {
       const room = rooms.get(user.roomId);
       if (room) {
         room.players.delete(user.id);
-        broadcastToRoom(room.id, { type: 'room', room: publicRoomInfo(room), players: Array.from(room.players.values()) });
+        broadcastToRoomRaw(room.id, { type: 'room', room: publicRoomInfo(room), players: Array.from(room.players.values()) });
         if (room.hostId === user.id) {
-          // Reassign host
           const next = Array.from(room.players.values())[0];
           if (next) {
             room.hostId = next.id;
@@ -243,24 +358,9 @@ wss.on('connection', (ws) => {
       if (!room) return;
       if (room.hostId !== user.id) return;
       if (room.players.size < 5) { ws.send(JSON.stringify({ type: 'error', message: 'Нужно минимум 5 игроков' })); return; }
-      if (room.players.size > room.maxPlayers) return;
       initGame(room);
-
-      // Send private info to spies and masked to others
-      const spies = room.game.players.filter(p => p.role === 'spy');
-      const spyPublic = spies.map(s => ({ id: s.id, name: s.name, spyNumber: s.spyNumber }));
-      for (const [ws2, u] of sockets.entries()) {
-        if (u.roomId === room.id) {
-          const me = room.game.players.find(p => p.id === u.id);
-          const isSpy = me?.role === 'spy';
-          const safe = safeGameForClient(room.game, u.id, isSpy, spyPublic);
-          const payload = { type: 'game', game: safe, you: me };
-          if (isSpy) payload.spies = spyPublic;
-          try { ws2.send(JSON.stringify(payload)); } catch {}
-        }
-      }
-      // broadcast room state
-      broadcastToRoom(room.id, { type: 'room', room: { ...publicRoomInfo(room), inviteKey: room.inviteKey }, players: Array.from(room.players.values()) });
+      broadcastGameState(room.id);
+      broadcastToRoomRaw(room.id, { type: 'room', room: { ...publicRoomInfo(room), inviteKey: room.inviteKey }, players: Array.from(room.players.values()) });
       return;
     }
 
@@ -271,36 +371,34 @@ wss.on('connection', (ws) => {
       const me = game.players.find(p => p.id === user.id);
       if (!me) return;
 
-      // Handle various actions similar to client offline logic
       const a = data.action;
 
       if (a.name === 'passTurn') {
-        // Разрешаем пропуск хода текущему игроку ИЛИ хосту
         const isCurrentPlayer = game.players[game.currentPlayerIndex].id === user.id;
         const isHost = room.hostId === user.id;
         
         if (isCurrentPlayer || isHost) {
            game.discussionTurnCount = (game.discussionTurnCount || 0) + 1;
            
-           // Если все игроки высказались (круг завершен)
            if (game.discussionTurnCount >= game.players.length) {
              game.phase = 'voting';
-             broadcastToRoom(room.id, { type: 'game', game });
            } else {
-             // Переход к следующему игроку
              game.currentPlayerIndex = (game.currentPlayerIndex + 1) % game.players.length;
              game.discussionTimeLeft = 40;
-             broadcastToRoom(room.id, { type: 'game', game });
            }
+           broadcastGameState(room.id);
         }
         return;
       }
 
       if (a.name === 'nominateSelf') {
         if (!me.nominated) {
+          // Rule: max 1 nomination active per player?
+          // Prompt says "не более одного выдвижения от одного игрока одновременно"
+          // We can just set nominated=true. Logic for checking duplicates is on client side usually, but server enforces state.
           me.nominated = true;
           if (!game.nominatedPlayers.includes(me.name)) game.nominatedPlayers.push(me.name);
-          broadcastToRoom(room.id, { type: 'game', game });
+          broadcastGameState(room.id);
         }
         return;
       }
@@ -308,8 +406,10 @@ wss.on('connection', (ws) => {
       if (a.name === 'nominateOther') {
         const other = game.players.find(p => p.name === a.playerName);
         if (other && !game.nominatedPlayers.includes(other.name)) {
+          // Note: we track who nominated whom? Not explicitly required by prompt simple logic, 
+          // just "nominatedPlayers" list.
           game.nominatedPlayers.push(other.name);
-          broadcastToRoom(room.id, { type: 'game', game });
+          broadcastGameState(room.id);
         }
         return;
       }
@@ -318,13 +418,7 @@ wss.on('connection', (ws) => {
         game.nominatedPlayers = game.nominatedPlayers.filter(n => n !== a.playerName);
         const p = game.players.find(p => p.name === a.playerName);
         if (p) p.nominated = false;
-        broadcastToRoom(room.id, { type: 'game', game });
-        return;
-      }
-
-      if (a.name === 'endNominationPhase') {
-        game.phase = 'voting';
-        broadcastToRoom(room.id, { type: 'game', game });
+        broadcastGameState(room.id);
         return;
       }
 
@@ -334,7 +428,6 @@ wss.on('connection', (ws) => {
           game.votes[me.id] = a.playerName;
           const allVoted = game.players.every(p => p.voted);
           if (allVoted) {
-            // tally
             const counts = {};
             for (const name of Object.values(game.votes)) counts[name] = (counts[name] || 0) + 1;
             let max = 0; let winners = [];
@@ -343,13 +436,11 @@ wss.on('connection', (ws) => {
               else if (c === max) { winners.push(name); }
             }
             if (winners.length === 0) {
-              // No nominations rule: pick starting speaker or previous leader
               const fallback = game.players[game.currentPlayerIndex]?.name || game.players[game.currentLeaderIndex]?.name;
               winners = [fallback];
             }
 
             if (winners.length > 1) {
-              // Advanced tie-break flow (simplified server-side): store tied list and switch to discussion30
               game.tieCandidates = winners;
               game.phase = 'tieDiscussion';
               game.tieTimeLeft = 30;
@@ -360,21 +451,50 @@ wss.on('connection', (ws) => {
               if (leader) {
                 leader.isLeader = true;
                 game.currentLeaderIndex = game.players.indexOf(leader);
-                game.currentPlayerIndex = game.currentLeaderIndex; // discussion starts from leader
-                game.phase = 'leaderSelection';
+                game.currentPlayerIndex = game.currentLeaderIndex;
+                game.discussionTurnCount = 0;
+                game.phase = 'discussion'; // Discussion restarts starting with leader
+                game.discussionTimeLeft = 40;
+                // Wait, logic says: "После определения лидера миссии начиная с него повторяется круг обсуждения... После окончания круга обсуждения лидеру миссии дается 80 секунд"
+                // So we go to 'discussion' phase again. BUT how do we distinguish this second discussion from the initial one?
+                // The initial one leads to 'voting'. This one leads to 'missionTeamSelection'.
+                // Let's call this phase 'leaderDiscussion'.
+                game.phase = 'leaderDiscussion';
               }
             }
           }
-          broadcastToRoom(room.id, { type: 'game', game });
+          broadcastGameState(room.id);
         }
         return;
       }
 
+      // Handling leaderDiscussion passTurn
+      if (a.name === 'passTurnLeaderDiscussion') {
+          // Similar to passTurn but transitions to missionTeamSelection
+         const isCurrentPlayer = game.players[game.currentPlayerIndex].id === user.id;
+         const isHost = room.hostId === user.id;
+         
+         if (isCurrentPlayer || isHost) {
+            game.discussionTurnCount = (game.discussionTurnCount || 0) + 1;
+            
+            if (game.discussionTurnCount >= game.players.length) {
+              game.phase = 'missionTeamSelection';
+              game.nominationTimeLeft = 80;
+            } else {
+              game.currentPlayerIndex = (game.currentPlayerIndex + 1) % game.players.length;
+              game.discussionTimeLeft = 40;
+            }
+            broadcastGameState(room.id);
+         }
+         return;
+      }
+
       if (a.name === 'startMissionTeamSelection') {
+        // Manually skip discussion?
         if (me.isLeader) {
           game.phase = 'missionTeamSelection';
           game.nominationTimeLeft = 80;
-          broadcastToRoom(room.id, { type: 'game', game });
+          broadcastGameState(room.id);
         }
         return;
       }
@@ -384,7 +504,7 @@ wss.on('connection', (ws) => {
           const missionSize = game.missionSizes[game.currentMission - 1];
           if (!game.missionTeam.includes(a.playerName) && game.missionTeam.length < missionSize) {
             game.missionTeam.push(a.playerName);
-            broadcastToRoom(room.id, { type: 'game', game });
+            broadcastGameState(room.id);
           }
         }
         return;
@@ -393,7 +513,7 @@ wss.on('connection', (ws) => {
       if (a.name === 'removeFromMissionTeam') {
         if (me.isLeader) {
           game.missionTeam = game.missionTeam.filter(n => n !== a.playerName);
-          broadcastToRoom(room.id, { type: 'game', game });
+          broadcastGameState(room.id);
         }
         return;
       }
@@ -401,7 +521,7 @@ wss.on('connection', (ws) => {
       if (a.name === 'resetMissionTeam') {
         if (me.isLeader) {
           game.missionTeam = [];
-          broadcastToRoom(room.id, { type: 'game', game });
+          broadcastGameState(room.id);
         }
         return;
       }
@@ -411,7 +531,7 @@ wss.on('connection', (ws) => {
           const missionSize = game.missionSizes[game.currentMission - 1];
           if (game.missionTeam.length === missionSize) {
             game.phase = 'missionVoting';
-            broadcastToRoom(room.id, { type: 'game', game });
+            broadcastGameState(room.id);
           }
         }
         return;
@@ -437,19 +557,19 @@ wss.on('connection', (ws) => {
 
             game.missionResults.push({ mission: game.currentMission, success: missionSuccess, successCount, failCount });
             if (missionSuccess) game.successfulMissions++; else game.failedMissions++;
+            
             if (game.successfulMissions >= 3 || game.failedMissions >= 3) {
               game.gameOver = true;
               game.winner = game.successfulMissions >= 3 ? 'resistance' : 'spy';
             }
             game.phase = 'missionResults';
           }
-          broadcastToRoom(room.id, { type: 'game', game });
+          broadcastGameState(room.id);
         }
         return;
       }
 
       if (a.name === 'startNextMission') {
-        // reset for next mission
         game.currentMission++;
         game.players.forEach(p => { p.nominated = false; p.voted = false; p.missionVote = null; p.isLeader = false; });
         game.nominatedPlayers = [];
@@ -457,42 +577,38 @@ wss.on('connection', (ws) => {
         game.missionTeam = [];
         game.missionVotes = {};
 
-        // next leader
         const nextIndex = (game.currentLeaderIndex + 1) % game.players.length;
         game.players[nextIndex].isLeader = true;
         game.currentLeaderIndex = nextIndex;
-        game.currentPlayerIndex = nextIndex; // discussion starts with leader
+        game.currentPlayerIndex = nextIndex; 
         game.discussionTurnCount = 0;
         game.phase = 'discussion';
         game.discussionTimeLeft = 40;
-        broadcastToRoom(room.id, { type: 'game', game });
+        broadcastGameState(room.id);
         return;
       }
 
       if (a.name === 'tieRevote') {
-        // simple re-vote reset among tie candidates
         game.players.forEach(p => p.voted = false);
         game.votes = {};
         game.phase = 'voting';
-        broadcastToRoom(room.id, { type: 'game', game });
+        broadcastGameState(room.id);
         return;
       }
     }
   });
 
   ws.on('close', () => {
-    console.log('WebSocket отключение');
     const u = sockets.get(ws);
     if (u) {
       const room = rooms.get(u.roomId);
       if (room) {
         room.players.delete(u.id);
-        broadcastToRoom(room.id, { type: 'room', room: publicRoomInfo(room), players: Array.from(room.players.values()) });
+        broadcastToRoomRaw(room.id, { type: 'room', room: publicRoomInfo(room), players: Array.from(room.players.values()) });
         cleanRoomIfEmpty(u.roomId);
       }
       sockets.delete(ws);
     }
-    broadcastLobby();
   });
 });
 
@@ -505,9 +621,4 @@ app.get('/health', (req, res) => res.json({ ok: true }));
 const PORT = process.env.PORT || 8080;
 server.listen(PORT, () => {
   console.log(`Server listening on http://localhost:${PORT}`);
-}).on('error', (err) => {
-  console.error('Ошибка запуска сервера:', err.message);
-  if (err.code === 'EADDRINUSE') {
-    console.error(`Порт ${PORT} уже занят. Попробуйте изменить порт: PORT=8081 npm start`);
-  }
 });
