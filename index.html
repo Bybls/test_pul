@@ -1,3 +1,4 @@
+
 <!DOCTYPE html>
 <html lang="ru">
 <head>
@@ -10,9 +11,14 @@
         .timer-bar { transition: width 1s linear; }
         .role-card { perspective: 1000px; }
         .role-card-inner { transition: transform 0.8s; transform-style: preserve-3d; position: relative; width: 100%; height: 260px; }
-        .role-card.flipped .role-card-inner { transform: rotateY(180deg); }
         .role-card-front, .role-card-back { backface-visibility: hidden; position: absolute; top: 0; left: 0; width: 100%; height: 100%; border-radius: 0.75rem; }
         .role-card-back { transform: rotateY(180deg); }
+        .custom-scrollbar::-webkit-scrollbar { width: 4px; }
+        .custom-scrollbar::-webkit-scrollbar-track { background: rgba(0,0,0,0.1); }
+        .custom-scrollbar::-webkit-scrollbar-thumb { background: rgba(255,255,255,0.2); border-radius: 4px; }
+        @keyframes fade-in { from { opacity: 0; transform: translateY(10px); } to { opacity: 1; transform: translateY(0); } }
+        .animate-fade-in { animation: fade-in 0.3s ease-out forwards; }
+        .animate-bounce-slow { animation: bounce 2s infinite; }
     </style>
 </head>
 <body class="bg-gradient-to-br from-gray-900 to-gray-800 text-gray-100 min-h-screen">
@@ -40,22 +46,24 @@
             creatingRoom: false,
             lastActionError: null,
             creationTimeoutId: null,
-            showCreateRoomForm: false // UI state
+            showCreateRoomForm: false, // UI state
+            isRoleFlipped: false
         };
 
         // --- Helpers ---
         const byId = (id) => document.getElementById(id);
 
         const computeDefaultWsUrl = () => {
-            // Check URL parameter ?server=wss://example.com
             const params = new URLSearchParams(location.search);
             const serverParam = params.get('server');
-            if (serverParam && serverParam.startsWith('ws')) {
-                return serverParam.trim();
+            if (serverParam) {
+                let url = serverParam.trim();
+                if (url.startsWith('https://')) return url.replace('https://', 'wss://');
+                if (url.startsWith('http://')) return url.replace('http://', 'ws://');
+                if (url.startsWith('ws://') || url.startsWith('wss://')) return url;
+                return 'wss://' + url;
             }
-            
-            // Always use public Render server by default
-            return 'wss://test-pul.onrender.com';
+            return 'ws://localhost:8080';
         };
         const wsUrl = () => gameState.serverWsUrl || localStorage.getItem('resistanceServerWsUrl') || computeDefaultWsUrl();
 
@@ -94,17 +102,13 @@
             const inviteRoom = params.get('room');
             const inviteKey = params.get('invite');
 
-            // Всегда показываем страницу входа для возможности изменить имя
-            // Пользователь может использовать сохранённое имя или ввести новое
             if (savedUser) {
                 gameState.user = JSON.parse(savedUser);
             }
             
-            // Всегда начинаем с экрана входа
             gameState.currentView = 'login';
             renderApp();
             
-            // Подключаемся к серверу для отображения статуса
             connectWS();
 
             if (inviteRoom && inviteKey) {
@@ -139,7 +143,6 @@
                 return;
             }
 
-            // Таймаут подключения (10 секунд)
             gameState.connectionTimeoutId = setTimeout(() => {
                 if (!gameState.wsConnected && gameState.connecting) {
                     console.error('Таймаут подключения WebSocket');
@@ -169,14 +172,12 @@
                 if (gameState.user) {
                     sendWS({ type: 'hello', userId: gameState.user.id, name: gameState.user.name });
                     sendWS({ type: 'getLobby' });
-                    // auto-join by invite
                     if (gameState.pendingInvite) {
                         const { roomId, inviteKey } = gameState.pendingInvite;
                         sendWS({ type: 'joinRoom', roomId, inviteKey });
                         gameState.pendingInvite = null;
                     }
                 } else {
-                    // Not logged in yet, just fetch lobby to show that server is alive
                     sendWS({ type: 'getLobby' });
                 }
                 renderApp();
@@ -201,7 +202,7 @@
                 }
                 gameState.wsConnected = false; 
                 gameState.connecting = false;
-                gameState.lastError = 'Не удалось подключиться к серверу. Проверьте адрес и запущен ли сервер.';
+                gameState.lastError = 'Не удалось подключиться к серверу.';
                 renderApp(); 
             };
         }
@@ -209,7 +210,7 @@
         function scheduleReconnect() {
             const attempt = Math.min(gameState.reconnectAttempts + 1, 10);
             gameState.reconnectAttempts = attempt;
-            const delay = Math.min(30000, Math.pow(2, attempt - 1) * 1000); // 1s,2s,4s,8s... up to 30s
+            const delay = Math.min(30000, Math.pow(2, attempt - 1) * 1000); 
             if (gameState.reconnectTimerId) return;
             gameState.reconnectTimerId = setTimeout(() => {
                 gameState.reconnectTimerId = null;
@@ -227,7 +228,6 @@
                     players: r.players, maxPlayers: r.maxPlayers,
                     hasPassword: !!r.hasPassword
                 }));
-                // Не переключаем автоматически вид с login на lobby, давая пользователю время изменить имя
                 renderApp();
                 return;
             }
@@ -256,10 +256,6 @@
                 gameState.lastActionError = null;
                 if (gameState.currentView !== 'game') gameState.currentView = 'game';
                 renderApp();
-                return;
-            }
-            if (data.type === 'chat') {
-                console.log('CHAT', data.from + ':', data.message);
                 return;
             }
             if (data.type === 'error') {
@@ -315,7 +311,6 @@
                     <span class="inline-flex items-center text-xs px-2 py-1 rounded-full ${statusClass}">
                         <i class="fas ${statusIcon} mr-1"></i>${statusText}
                     </span>
-                    ${gameState.reconnectAttempts > 0 ? `<span class="text-xs text-gray-400">Попытка ${gameState.reconnectAttempts}</span>` : ''}
                     <span class="text-xs text-gray-400 truncate max-w-[200px]" title="${url}"><i class="fas fa-plug mr-1"></i>${url}</span>
                     <button onclick="reconnectNow()" class="text-xs bg-gray-700 hover:bg-gray-600 border border-gray-600 px-2 py-1 rounded"><i class="fas fa-rotate mr-1"></i>Подключиться</button>
                     <button onclick="promptServerUrl()" class="text-xs bg-gray-700 hover:bg-gray-600 border border-gray-600 px-2 py-1 rounded"><i class="fas fa-gear mr-1"></i>Настройки</button>
@@ -331,71 +326,23 @@
                     <div class="flex items-start justify-between mb-4">
                         <div class="text-left">
                             <h1 class="text-4xl font-bold text-blue-400 mb-2">Сопротивление</h1>
-                            <p class="text-gray-300">Мультиплеерная игра для 5-9 игроков</p>
+                            <p class="text-gray-300">Мультиплеерная игра</p>
                         </div>
-                        ${connectionControlsInline()}
                     </div>
-                    
-                    <!-- Статус подключения -->
-                    ${gameState.connecting ? `
-                        <div class="mb-6 bg-gradient-to-r from-yellow-900/40 to-yellow-800/30 border border-yellow-700 rounded-xl p-4">
-                            <div class="flex items-center">
-                                <i class="fas fa-spinner fa-spin text-yellow-400 text-xl mr-3"></i>
-                                <div>
-                                    <h3 class="text-lg font-bold text-white">Подключение к серверу...</h3>
-                                    <p class="text-yellow-300 text-sm">Первое подключение может занять до 1 минуты (сервер просыпается)</p>
-                                </div>
-                            </div>
-                        </div>
-                    ` : ''}
-                    
-                    ${gameState.wsConnected ? `
-                        <div class="mb-6 bg-gradient-to-r from-green-900/40 to-green-800/30 border border-green-700 rounded-xl p-4">
-                            <div class="flex items-center">
-                                <i class="fas fa-check-circle text-green-400 text-xl mr-3"></i>
-                                <div>
-                                    <h3 class="text-lg font-bold text-white">Сервер подключен!</h3>
-                                    <p class="text-green-300 text-sm">Введите имя и войдите в игру</p>
-                                </div>
-                            </div>
-                        </div>
-                    ` : ''}
-                    
-                    ${!gameState.wsConnected && !gameState.connecting ? `
-                        <div class="mb-6 bg-gradient-to-r from-red-900/40 to-red-800/30 border border-red-700 rounded-xl p-4">
-                            <div class="flex items-center mb-2">
-                                <i class="fas fa-server text-red-400 text-xl mr-3"></i>
-                                <h3 class="text-lg font-bold text-white">Сервер не подключен</h3>
-                            </div>
-                            ${gameState.lastError ? `<div class="mb-3 p-3 bg-red-900/50 border border-red-800 rounded"><p class="text-red-200 text-sm"><i class="fas fa-exclamation-triangle mr-2"></i>${gameState.lastError}</p></div>` : ''}
-                            <p class="text-gray-300 text-sm mb-3">Подключение к серверу <span class="font-mono text-blue-300">${wsUrl()}</span></p>
-                            <div class="pt-2 flex space-x-3">
-                                <button onclick="reconnectNow()" class="flex-1 bg-gradient-to-r from-blue-600 to-indigo-700 hover:from-blue-700 hover:to-indigo-800 text-white font-semibold py-2 px-4 rounded-lg transition">
-                                    <i class="fas fa-redo mr-2"></i>Повторить подключение
-                                </button>
-                                <button onclick="promptServerUrl()" class="flex-1 bg-gradient-to-r from-gray-600 to-gray-700 hover:from-gray-700 hover:to-gray-800 text-white font-semibold py-2 px-4 rounded-lg transition">
-                                    <i class="fas fa-gear mr-2"></i>Настройки
-                                </button>
-                            </div>
-                        </div>
-                    ` : ''}
-                    
-                    <div class="mb-6">
+                    ${connectionControlsInline()}
+                    <div class="mb-6 mt-4">
                         <label class="block text-gray-300 mb-2" for="username">Имя игрока</label>
                         <input type="text" id="username" class="w-full px-4 py-3 bg-gray-700 border border-gray-600 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500" placeholder="Введите ваше имя" value="${savedName}">
-                        <p class="text-sm text-gray-400 mt-2">${savedName ? 'Вы можете изменить имя перед входом' : 'Имя будет видно другим игрокам'}</p>
                     </div>
                     <div class="mb-8">
                         <label class="block text-gray-300 mb-2" for="deviceId">ID устройства</label>
                         <input type="text" id="deviceId" class="w-full px-4 py-3 bg-gray-700 border border-gray-600 rounded-lg" value="${generateDeviceId()}" readonly>
-                        <p class="text-sm text-gray-400 mt-2">Автоматически сгенерированный ID вашего устройства</p>
                     </div>
                     <button onclick="handleLogin()" class="w-full bg-gradient-to-r from-blue-600 to-indigo-700 hover:from-blue-700 hover:to-indigo-800 text-white font-semibold py-3 px-4 rounded-lg transition ${!gameState.wsConnected ? 'opacity-50' : ''}">
-                        <i class="fas fa-sign-in-alt mr-2"></i>${savedName ? 'Войти в игру' : 'Войти в игру'}
+                        <i class="fas fa-sign-in-alt mr-2"></i>Войти в игру
                     </button>
-                    ${!gameState.wsConnected ? `<p class="text-center text-yellow-400 text-sm mt-2">Дождитесь подключения к серверу</p>` : ''}
                     <div class="mt-6 pt-6 border-t border-gray-700 text-center">
-                        <p class="text-gray-400 text-sm">Нужна помощь? <a href="javascript:void(0);" onclick="showHelp()" class="text-blue-400 hover:text-blue-300 underline">Инструкция по запуску</a></p>
+                        <p class="text-gray-400 text-sm"><a href="javascript:void(0);" onclick="showHelp()" class="text-blue-400 hover:text-blue-300 underline">Инструкция по запуску</a></p>
                     </div>
                 </div>
             `;
@@ -405,17 +352,12 @@
             const username = byId('username')?.value?.trim();
             const deviceId = byId('deviceId')?.value;
             if (!username) { alert('Пожалуйста, введите имя игрока'); return; }
-            if (!gameState.wsConnected) { 
-                alert('Дождитесь подключения к серверу или нажмите "Повторить подключение"'); 
-                return; 
-            }
+            if (!gameState.wsConnected) { alert('Дождитесь подключения к серверу'); return; }
             gameState.user = { id: deviceId, name: username, deviceId };
             localStorage.setItem('resistanceUser', JSON.stringify(gameState.user));
             gameState.currentView = 'lobby';
-            // Отправляем hello на сервер с новым именем
             sendWS({ type: 'hello', userId: gameState.user.id, name: gameState.user.name });
             sendWS({ type: 'getLobby' });
-            // auto-join by invite if pending
             if (gameState.pendingInvite) {
                 const { roomId, inviteKey } = gameState.pendingInvite;
                 sendWS({ type: 'joinRoom', roomId, inviteKey });
@@ -431,256 +373,72 @@
                         <div class="w-full md:w-auto">
                             <h1 class="text-3xl font-bold text-blue-400">Лобби игры</h1>
                             <div class="flex items-center gap-2">
-                                <p class="text-gray-300">Добро пожаловать, <span class="font-bold text-white">${gameState.user?.name || ''}</span>!</p>
-                                <button onclick="changeNickname()" class="text-xs bg-gray-700 hover:bg-gray-600 border border-gray-600 px-2 py-1 rounded" title="Изменить имя">
-                                    <i class="fas fa-edit"></i>
-                                </button>
+                                <p class="text-gray-300">Игрок: <span class="font-bold text-white">${gameState.user?.name || ''}</span></p>
+                                <button onclick="changeNickname()" class="text-xs bg-gray-700 px-2 py-1 rounded"><i class="fas fa-edit"></i></button>
                             </div>
-                            ${!gameState.wsConnected ? '<p class="text-sm text-red-400">Нет соединения с сервером...</p>' : ''}
                         </div>
                         <div class="flex flex-col md:flex-row items-center gap-3 mt-4 md:mt-0">
                             ${connectionControlsInline()}
-                            <div class="flex items-center gap-3">
-                                <button onclick="showCreateRoomForm()" class="bg-gradient-to-r from-green-600 to-emerald-700 hover:from-green-700 hover:to-emerald-800 text-white font-semibold py-2 px-6 rounded-lg transition flex items-center" ${!gameState.wsConnected ? 'disabled' : ''}>
-                                    <i class="fas fa-plus mr-2"></i>Создать комнату
-                                </button>
-                                <button onclick="logout()" class="bg-gradient-to-r from-gray-700 to-gray-800 hover:from-gray-800 hover:to-gray-900 text-white font-semibold py-2 px-6 rounded-lg transition border border-gray-600">
-                                    <i class="fas fa-sign-out-alt mr-2"></i>Выйти
-                                </button>
-                            </div>
+                            <button onclick="showCreateRoomForm()" class="bg-gradient-to-r from-green-600 to-emerald-700 text-white font-semibold py-2 px-6 rounded-lg">Создать комнату</button>
+                            <button onclick="logout()" class="bg-gray-700 text-white font-semibold py-2 px-6 rounded-lg">Выйти</button>
                         </div>
                     </div>
-                    ${!gameState.wsConnected ? `
-                        <div class="mb-6 bg-gradient-to-r from-red-900/40 to-red-800/30 border border-red-700 rounded-xl p-6">
-                            <div class="flex items-center mb-2">
-                                <i class="fas fa-server text-red-400 text-xl mr-3"></i>
-                                <h3 class="text-lg font-bold text-white">Сервер не подключен</h3>
-                            </div>
-                            ${gameState.lastError ? `<div class="mb-3 p-3 bg-red-900/50 border border-red-800 rounded"><p class="text-red-200 text-sm"><i class="fas fa-exclamation-triangle mr-2"></i>${gameState.lastError}</p></div>` : ''}
-                            <p class="text-gray-300 text-sm mb-3">Для создания комнаты и игры необходимо подключиться к серверу.</p>
-                            <div class="space-y-4">
-                                <div>
-                                    <p class="text-gray-400 text-sm"><i class="fas fa-plug mr-2"></i>Текущий адрес сервера: <span class="font-mono text-blue-300">${wsUrl()}</span></p>
-                                    <p class="text-gray-400 text-sm">Для локального тестирования используйте <span class="font-mono text-green-300">ws://localhost:8080</span></p>
-                                    <p class="text-gray-400 text-sm">Для игры с друзьями используйте публичный сервер: <span class="font-mono text-green-300">wss://test-pul.onrender.com</span></p>
-                                    <p class="text-gray-400 text-sm mt-1"><i class="fas fa-info-circle mr-1"></i>Публичный сервер на Render.com может просыпаться до 1 минуты при первом подключении.</p>
-                                </div>
-                                <div class="pt-2 flex space-x-3">
-                                    <button onclick="reconnectNow()" class="flex-1 bg-gradient-to-r from-blue-600 to-indigo-700 hover:from-blue-700 hover:to-indigo-800 text-white font-semibold py-2 px-4 rounded-lg transition">
-                                        <i class="fas fa-redo mr-2"></i>Повторить попытку подключения
-                                    </button>
-                                    <button onclick="promptServerUrl()" class="flex-1 bg-gradient-to-r from-gray-600 to-gray-700 hover:from-gray-700 hover:to-gray-800 text-white font-semibold py-2 px-4 rounded-lg transition">
-                                        <i class="fas fa-gear mr-2"></i>Настройки сервера
-                                    </button>
-                                </div>
-                            </div>
-                        </div>
-                    ` : ''}
 
-                    <div id="createRoomCard" class="bg-gradient-to-br from-gray-800 to-gray-900 border border-gray-700 rounded-xl p-6 shadow-lg mb-6 ${gameState.showCreateRoomForm ? '' : 'hidden'}">
+                    ${gameState.showCreateRoomForm ? `
+                    <div id="createRoomCard" class="bg-gray-800 border border-gray-700 rounded-xl p-6 shadow-lg mb-6">
                         <div class="flex justify-between items-center mb-4">
-                            <h3 class="text-xl font-bold text-green-400">Создать новую игру</h3>
-                            <button onclick="hideCreateRoomForm()" class="text-gray-400 hover:text-white">
-                                <i class="fas fa-times"></i>
-                            </button>
+                            <h3 class="text-xl font-bold text-green-400">Создать игру</h3>
+                            <button onclick="hideCreateRoomForm()" class="text-gray-400 hover:text-white"><i class="fas fa-times"></i></button>
                         </div>
-                        ${!gameState.wsConnected ? `
-                            <div class="mb-4 p-3 bg-red-900/50 border border-red-700 rounded">
-                                <p class="text-red-200 text-sm"><i class="fas fa-exclamation-triangle mr-2"></i>Нет соединения с сервером. Дождитесь подключения.</p>
-                            </div>
-                        ` : ''}
+                        ${!gameState.wsConnected ? `<p class="text-red-400 mb-2">Нет соединения с сервером</p>` : ''}
+                        ${gameState.creatingRoom ? `<p class="text-yellow-400 mb-2"><i class="fas fa-spinner fa-spin mr-2"></i>Создание комнаты...</p>` : ''}
                         <div class="mb-4">
-                            <label class="block text-gray-300 mb-2">Количество игроков</label>
-                            <select id="playerCount" class="w-full px-4 py-2 bg-gray-700 border border-gray-600 rounded-lg focus:outline-none focus:ring-2 focus:ring-green-500">
-                                <option value="5">5 игроков (2 шпиона)</option>
-                                <option value="6">6 игроков (2 шпиона)</option>
-                                <option value="7">7 игроков (3 шпиона)</option>
-                                <option value="8" selected>8 игроков (3 шпиона)</option>
-                                <option value="9">9 игроков (3 шпиона)</option>
+                            <label class="block text-gray-300 mb-2">Игроков</label>
+                            <select id="playerCount" class="w-full px-4 py-2 bg-gray-700 border border-gray-600 rounded-lg">
+                                <option value="5">5</option><option value="6">6</option><option value="7">7</option><option value="8" selected>8</option><option value="9">9</option>
                             </select>
                         </div>
                         <div class="mb-6">
-                            <label class="flex items-center text-gray-300">
-                                <input type="checkbox" id="usePassword" class="mr-2 h-5 w-5 text-green-500 rounded" onchange="togglePasswordInput(this)">Защитить паролем
-                            </label>
-                            <input type="password" id="roomPassword" class="w-full mt-2 px-4 py-2 bg-gray-700 border border-gray-600 rounded-lg hidden" placeholder="Введите пароль">
+                            <label class="flex items-center text-gray-300"><input type="checkbox" id="usePassword" class="mr-2" onchange="togglePasswordInput(this)">Пароль</label>
+                            <input type="password" id="roomPassword" class="w-full mt-2 px-4 py-2 bg-gray-700 border border-gray-600 rounded-lg hidden" placeholder="Пароль">
                         </div>
-                        <button onclick="createRoomFromForm()" ${gameState.creatingRoom || !gameState.wsConnected ? 'disabled' : ''} class="w-full bg-gradient-to-r from-green-600 to-emerald-700 hover:from-green-700 hover:to-emerald-800 text-white font-semibold py-3 px-4 rounded-lg transition flex items-center justify-center ${gameState.creatingRoom || !gameState.wsConnected ? 'opacity-75 cursor-not-allowed' : ''}">
-                            ${gameState.creatingRoom ? `
-                                <i class="fas fa-spinner fa-spin mr-2"></i>Создание комнаты...
-                            ` : `
-                                <i class="fas fa-gamepad mr-2"></i>Создать игровую комнату
-                            `}
-                        </button>
-                        ${gameState.lastActionError ? `
-                            <div class="mt-4 p-3 bg-red-900/50 border border-red-700 rounded">
-                                <p class="text-red-200 text-sm"><i class="fas fa-exclamation-triangle mr-2"></i>${gameState.lastActionError}</p>
-                            </div>
-                        ` : ''}
-                    </div>
+                        <button onclick="createRoomFromForm()" ${gameState.creatingRoom ? 'disabled' : ''} class="w-full bg-green-600 text-white font-semibold py-3 px-4 rounded-lg">Создать</button>
+                    </div>` : ''}
 
                     <div class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
-                        ${gameState.rooms.length > 0 ? gameState.rooms.map(room => `
-                            <div class="bg-gradient-to-br from-gray-800 to-gray-900 border border-gray-700 rounded-xl p-6 shadow-lg">
+                        ${gameState.rooms.map(room => `
+                            <div class="bg-gray-800 border border-gray-700 rounded-xl p-6 shadow-lg">
                                 <div class="flex justify-between items-start mb-4">
-                                    <div>
-                                        <h3 class="text-xl font-bold text-blue-400">${room.name}</h3>
-                                        <p class="text-gray-300">Создатель: ${room.host}</p>
-                                    </div>
+                                    <div><h3 class="text-xl font-bold text-blue-400">${room.name}</h3><p class="text-gray-300">Хост: ${room.host}</p></div>
                                     <div class="bg-gray-700 text-white text-sm font-semibold px-3 py-1 rounded-full">${room.players}/${room.maxPlayers}</div>
                                 </div>
-                                <div class="mb-6">
-                                    <div class="flex items-center text-gray-300 mb-2">
-                                        <i class="fas ${room.hasPassword ? 'fa-lock text-red-400' : 'fa-lock-open text-green-400'} mr-2"></i>
-                                        ${room.hasPassword ? 'Требуется пароль' : 'Без пароля'}
-                                    </div>
-                                </div>
+                                <div class="mb-6"><div class="flex items-center text-gray-300 mb-2"><i class="fas ${room.hasPassword ? 'fa-lock text-red-400' : 'fa-lock-open text-green-400'} mr-2"></i>${room.hasPassword ? 'Пароль' : 'Открыта'}</div></div>
                                 <div class="flex space-x-3">
-                                    ${room.hasPassword ? `
-                                        <button onclick="joinRoomWithPassword('${room.id}')" class="flex-1 bg-gradient-to-r from-blue-600 to-indigo-700 hover:from-blue-700 hover:to-indigo-800 text-white font-semibold py-2 px-4 rounded-lg">Войти</button>
-                                    ` : `
-                                        <button onclick="joinRoom('${room.id}')" class="flex-1 bg-gradient-to-r from-blue-600 to-indigo-700 hover:from-blue-700 hover:to-indigo-800 text-white font-semibold py-2 px-4 rounded-lg">Присоединиться</button>
-                                    `}
+                                    ${room.hasPassword ? `<button onclick="joinRoomWithPassword('${room.id}')" class="flex-1 bg-blue-600 text-white py-2 px-4 rounded-lg">Войти</button>` : `<button onclick="joinRoom('${room.id}')" class="flex-1 bg-blue-600 text-white py-2 px-4 rounded-lg">Войти</button>`}
                                 </div>
                             </div>
-                        `).join('') : `
-                            <div class="bg-gradient-to-br from-gray-800 to-gray-900 border border-gray-700 rounded-xl p-6 shadow-lg lg:col-span-2">
-                                <div class="text-center py-8">
-                                    <i class="fas fa-door-open text-4xl text-gray-500 mb-4"></i>
-                                    <h3 class="text-xl font-bold text-gray-400 mb-2">Нет активных комнат</h3>
-                                    <p class="text-gray-500">Создайте первую комнату или попросите друга создать игру</p>
-                                </div>
-                            </div>
-                        `}
-                    </div>
-
-                    <div class="bg-gradient-to-br from-blue-900/30 to-indigo-900/20 border border-blue-800 rounded-xl p-6 shadow-lg mt-8">
-                        <h2 class="text-2xl font-bold text-blue-400 mb-4">Игра с разных устройств</h2>
-                        <p class="text-gray-300">Комнаты создаются только реальными игроками и доступны всем устройствам через сервер. Для входа без пароля используйте ссылку-приглашение из комнаты ожидания.</p>
+                        `).join('')}
                     </div>
                 </div>
             `;
         }
 
-        function showCreateRoomForm() {
-            if (!gameState.wsConnected) {
-                alert('Дождитесь подключения к серверу');
-                return;
-            }
-            gameState.showCreateRoomForm = true;
-            renderApp();
-        }
-        
-        function hideCreateRoomForm() {
-            gameState.showCreateRoomForm = false;
-            renderApp();
-        }
-
-        function togglePasswordInput(checkbox) {
-            const pf = byId('roomPassword');
-            if (!pf) return;
-            if (checkbox.checked) { pf.classList.remove('hidden'); pf.focus(); } else { pf.classList.add('hidden'); }
-        }
-
+        function showCreateRoomForm() { gameState.showCreateRoomForm = true; renderApp(); }
+        function hideCreateRoomForm() { gameState.showCreateRoomForm = false; renderApp(); }
+        function togglePasswordInput(cb) { const el = byId('roomPassword'); if (el) el.classList.toggle('hidden', !cb.checked); }
         function createRoomFromForm() {
-            if (!gameState.wsConnected) { 
-                alert('Нет соединения с сервером. Дождитесь подключения или нажмите "Подключиться".'); 
-                return; 
-            }
-            if (gameState.creatingRoom) {
-                console.log('Создание комнаты уже в процессе...');
-                return;
-            }
-            
-            const playerCountEl = byId('playerCount');
-            const usePasswordEl = byId('usePassword');
-            const passwordEl = byId('roomPassword');
-            
-            if (!playerCountEl) {
-                console.error('Не найден элемент playerCount');
-                return;
-            }
-            
-            const playerCount = parseInt(playerCountEl.value);
-            const usePassword = usePasswordEl?.checked || false;
-            const password = passwordEl?.value || '';
-            
-            if (usePassword && !password) { 
-                alert('Пожалуйста, введите пароль для комнаты'); 
-                return; 
-            }
-            
+            if (!gameState.wsConnected) { alert('Нет соединения'); return; }
+            const pc = parseInt(byId('playerCount').value);
+            const pass = byId('usePassword').checked ? byId('roomPassword').value : null;
             gameState.creatingRoom = true;
-            gameState.lastActionError = null;
-            if (gameState.creationTimeoutId) {
-                clearTimeout(gameState.creationTimeoutId);
-                gameState.creationTimeoutId = null;
-            }
             renderApp();
-            
-            const roomData = { 
-                type: 'createRoom', 
-                name: `Игра ${gameState.user.name}`, 
-                maxPlayers: playerCount, 
-                password: usePassword ? password : null 
-            };
-            console.log('Отправка запроса на создание комнаты:', roomData);
-            
-            try {
-                sendWS(roomData);
-            } catch (e) {
-                console.error('Ошибка при отправке:', e);
-                gameState.creatingRoom = false;
-                gameState.lastActionError = 'Ошибка при отправке запроса: ' + e.message;
-                renderApp();
-                return;
-            }
-            
-            // Таймаут на случай, если ответ не придет
-            gameState.creationTimeoutId = setTimeout(() => {
-                if (gameState.creatingRoom) {
-                    gameState.creatingRoom = false;
-                    gameState.creationTimeoutId = null;
-                    gameState.lastActionError = 'Не удалось создать комнату. Сервер не ответил за 15 секунд.';
-                    renderApp();
-                    alert('Сервер не ответил. Возможно, сервер перезагружается. Попробуйте еще раз.');
-                }
-            }, 15000);
+            sendWS({ type: 'createRoom', name: `Игра ${gameState.user.name}`, maxPlayers: pc, password: pass });
+            gameState.creationTimeoutId = setTimeout(() => { gameState.creatingRoom = false; gameState.lastActionError='Timeout'; renderApp(); }, 10000);
         }
-
-        function joinRoom(roomId) { if (!gameState.wsConnected) { alert('Нет соединения с сервером'); return; } sendWS({ type: 'joinRoom', roomId }); }
-        function joinRoomWithPassword(roomId) {
-            if (!gameState.wsConnected) { alert('Нет соединения с сервером'); return; }
-            const password = prompt('Введите пароль для входа в комнату:');
-            if (password !== null) sendWS({ type: 'joinRoom', roomId, password });
-        }
-
-        function logout() {
-            localStorage.removeItem('resistanceUser');
-            gameState.user = null;
-            gameState.rooms = [];
-            gameState.currentRoom = null;
-            gameState.gameData = null;
-            try { gameState.ws?.close(); } catch {}
-            gameState.ws = null; gameState.wsConnected = false;
-            gameState.currentView = 'login';
-            renderApp();
-            // Переподключаемся для отображения статуса
-            setTimeout(() => connectWS(), 100);
-        }
-        
-        function changeNickname() {
-            const newName = prompt('Введите новое имя игрока:', gameState.user?.name || '');
-            if (newName && newName.trim()) {
-                gameState.user.name = newName.trim();
-                localStorage.setItem('resistanceUser', JSON.stringify(gameState.user));
-                // Уведомляем сервер о смене имени
-                if (gameState.wsConnected) {
-                    sendWS({ type: 'hello', userId: gameState.user.id, name: gameState.user.name });
-                }
-                renderApp();
-            }
-        }
+        function joinRoom(id) { sendWS({ type: 'joinRoom', roomId: id }); }
+        function joinRoomWithPassword(id) { const p = prompt('Пароль:'); if (p!==null) sendWS({ type: 'joinRoom', roomId: id, password: p }); }
+        function logout() { localStorage.removeItem('resistanceUser'); gameState.user=null; gameState.currentView='login'; renderApp(); }
+        function changeNickname() { const n = prompt('Новое имя:', gameState.user.name); if(n) { gameState.user.name=n; localStorage.setItem('resistanceUser', JSON.stringify(gameState.user)); sendWS({type:'hello', userId:gameState.user.id, name:n}); renderApp(); } }
 
         function renderGameRoomView() {
             const r = gameState.currentRoom;
@@ -691,102 +449,47 @@
                 <div class="max-w-5xl mx-auto">
                     <div class="flex justify-between items-center mb-2">${connectionControlsInline()}</div>
                     <div class="flex justify-between items-center mb-8">
-                        <div>
-                            <h1 class="text-3xl font-bold text-blue-400">Комната: ${r.name}</h1>
-                            <p class="text-gray-300">Ожидание игроков... (${r.playersList.length}/${r.maxPlayers})</p>
-                        </div>
-                        <button onclick="leaveRoom()" class="bg-gradient-to-r from-red-600 to-red-700 hover:from-red-700 hover:to-red-800 text-white font-semibold py-2 px-6 rounded-lg transition">
-                            <i class="fas fa-times mr-2"></i>Покинуть комнату
-                        </button>
+                        <div><h1 class="text-3xl font-bold text-blue-400">Комната: ${r.name}</h1><p class="text-gray-300">(${r.playersList.length}/${r.maxPlayers})</p></div>
+                        <button onclick="leaveRoom()" class="bg-red-600 text-white py-2 px-6 rounded-lg">Покинуть</button>
                     </div>
-
                     <div class="grid grid-cols-1 lg:grid-cols-3 gap-8">
                         <div class="lg:col-span-2">
-                            <div class="bg-gradient-to-br from-gray-800 to-gray-900 border border-gray-700 rounded-xl p-6 shadow-lg mb-6">
-                                <h2 class="text-2xl font-bold text-yellow-400 mb-4">Игроки в комнате</h2>
+                            <div class="bg-gray-800 border border-gray-700 rounded-xl p-6 shadow-lg mb-6">
+                                <h2 class="text-2xl font-bold text-yellow-400 mb-4">Игроки</h2>
                                 <div class="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 gap-4">
-                                    ${r.playersList.map(p => `
-                                        <div class="bg-gray-700 border ${p.id === gameState.user.id ? 'border-blue-500' : 'border-gray-600'} rounded-lg p-4 flex items-center">
-                                            <div class="w-10 h-10 rounded-full bg-gradient-to-r from-blue-500 to-indigo-600 flex items-center justify-center text-white font-bold mr-3">${p.name.charAt(0)}</div>
-                                            <div>
-                                                <h3 class="font-semibold ${p.id === gameState.user.id ? 'text-blue-300' : 'text-white'}">${p.name}</h3>
-                                                <p class="text-sm text-gray-400">${p.id === r.hostId ? 'Создатель комнаты' : 'Игрок'}</p>
-                                            </div>
-                                        </div>
-                                    `).join('')}
-                                    ${Array.from({length: Math.max(0, r.maxPlayers - r.playersList.length)}).map(() => `
-                                        <div class="bg-gray-800 border border-dashed border-gray-600 rounded-lg p-4 flex items-center">
-                                            <div class="w-10 h-10 rounded-full bg-gray-700 flex items-center justify-center text-gray-500 font-bold mr-3"><i class="fas fa-user-plus"></i></div>
-                                            <div><h3 class="font-semibold text-gray-500">Ожидание игрока...</h3><p class="text-sm text-gray-500">Свободное место</p></div>
-                                        </div>
-                                    `).join('')}
+                                    ${r.playersList.map(p => `<div class="bg-gray-700 border border-gray-600 rounded-lg p-4 flex items-center"><div class="w-10 h-10 rounded-full bg-blue-600 flex items-center justify-center text-white font-bold mr-3">${p.name.charAt(0)}</div><div><h3 class="font-semibold text-white">${p.name}</h3></div></div>`).join('')}
                                 </div>
                             </div>
-
-                            <div class="bg-gradient-to-br from-gray-800 to-gray-900 border border-gray-700 rounded-xl p-6 shadow-lg">
-                                <h2 class="text-2xl font-bold text-green-400 mb-4">Пригласить друзей</h2>
-                                <div class="mb-4">
-                                    <label class="block text-gray-300 mb-2">Ссылка для приглашения (без пароля)</label>
-                                    <div class="flex">
-                                        <input type="text" id="inviteLink" class="flex-1 px-4 py-3 bg-gray-700 border border-gray-600 rounded-l-lg" value="${inviteLink}" readonly>
-                                        <button onclick="copyInviteLink()" class="bg-gradient-to-r from-green-600 to-emerald-700 hover:from-green-700 hover:to-emerald-800 text-white font-semibold py-3 px-6 rounded-r-lg transition"><i class="fas fa-copy"></i></button>
-                                    </div>
-                                    <p class="text-sm text-gray-400 mt-2">По этой ссылке можно войти без пароля даже с другого устройства и IP</p>
-                                </div>
-                                ${r.hasPassword ? `
-                                    <p class="text-sm text-gray-400">У комнаты также установлен пароль. По прямому входу через список потребуется пароль.</p>
-                                ` : ''}
+                            <div class="bg-gray-800 border border-gray-700 rounded-xl p-6 shadow-lg">
+                                <h2 class="text-2xl font-bold text-green-400 mb-4">Пригласить</h2>
+                                <div class="flex"><input type="text" id="inviteLink" class="flex-1 px-4 py-3 bg-gray-700 border border-gray-600 rounded-l-lg" value="${inviteLink}" readonly><button onclick="copyInviteLink()" class="bg-green-600 text-white px-6 rounded-r-lg"><i class="fas fa-copy"></i></button></div>
                             </div>
                         </div>
-
                         <div>
-                            <div class="bg-gradient-to-br from-gray-800 to-gray-900 border border-gray-700 rounded-xl p-6 shadow-lg sticky top-6">
-                                <h2 class="text-2xl font-bold text-purple-400 mb-4">Управление игрой</h2>
-                                <div class="mb-6">
-                                    <div class="space-y-3">
-                                        <div><p class="text-gray-400">Количество игроков:</p><p class="text-white font-bold">${r.maxPlayers}</p></div>
-                                        <div><p class="text-gray-400">Шпионов в игре:</p><p class="text-white font-bold">${getSpyCount(r.maxPlayers)}</p></div>
-                                        <div><p class="text-gray-400">Игроков сопротивления:</p><p class="text-white font-bold">${getResistanceCount(r.maxPlayers)}</p></div>
-                                    </div>
+                            <div class="bg-gray-800 border border-gray-700 rounded-xl p-6 shadow-lg sticky top-6">
+                                <h2 class="text-2xl font-bold text-purple-400 mb-4">Инфо</h2>
+                                <div class="space-y-3 mb-6">
+                                    <div><p class="text-gray-400">Шпионов:</p><p class="text-white font-bold">${getSpyCount(r.maxPlayers)}</p></div>
+                                    <div><p class="text-gray-400">Сопротивления:</p><p class="text-white font-bold">${getResistanceCount(r.maxPlayers)}</p></div>
                                 </div>
-                                ${isHost ? `
-                                    <div class="mb-6">
-                                        <h3 class="text-lg font-semibold text-gray-300 mb-2">Действия создателя</h3>
-                                        <div class="space-y-3">
-                                            <button onclick="startGame()" class="w-full bg-gradient-to-r from-green-600 to-emerald-700 hover:from-green-700 hover:to-emerald-800 text-white font-semibold py-3 px-4 rounded-lg transition flex items-center justify-center">
-                                                <i class="fas fa-play mr-2"></i>Начать игру
-                                            </button>
-                                            <p class="text-sm text-gray-400 text-center">Минимум 5 игроков. Роли распределит сервер.</p>
-                                        </div>
-                                    </div>
-                                ` : `
-                                    <div class="mb-6">
-                                        <div class="bg-blue-900/30 border border-blue-700 rounded-lg p-4">
-                                            <div class="flex items-center">
-                                                <i class="fas fa-hourglass-half text-blue-400 text-2xl mr-3"></i>
-                                                <div>
-                                                    <p class="text-white font-semibold">Ожидание создателя комнаты</p>
-                                                    <p class="text-blue-300 text-sm">Игра начнется, когда создатель запустит её</p>
-                                                </div>
-                                            </div>
-                                        </div>
-                                    </div>
-                                `}
+                                ${isHost ? `<button onclick="startGame()" class="w-full bg-green-600 text-white py-3 rounded-lg">Начать игру</button>` : `<p class="text-center text-gray-400">Ожидание хоста...</p>`}
                             </div>
                         </div>
                     </div>
                 </div>
             `;
         }
-
-        function copyInviteLink() { const el = byId('inviteLink'); el.select(); document.execCommand('copy'); alert('Ссылка скопирована!'); }
-        function leaveRoom() { sendWS({ type: 'leaveRoom' }); gameState.currentRoom = null; gameState.currentView = 'lobby'; renderApp(); }
+        function copyInviteLink() { const el=byId('inviteLink'); el.select(); document.execCommand('copy'); alert('Скопировано'); }
+        function leaveRoom() { sendWS({ type: 'leaveRoom' }); gameState.currentRoom=null; gameState.currentView='lobby'; renderApp(); }
         function startGame() { sendWS({ type: 'startGame' }); }
 
-        // --- Game Rendering (client uses server state) ---
         function renderGameView() {
             const game = gameState.gameData;
-            if (!game) return '<div class="text-center py-12">Ожидание данных игры...</div>';
+            if (!game) return '<div>Loading...</div>';
+            
+            // New Phase Handler
+            if (game.phase === 'roleReveal') return renderRoleRevealPhase(game);
+
             const currentPlayer = game.players[game.currentPlayerIndex];
             const currentLeader = game.players.find(p => p.isLeader);
             const me = game.players.find(p => p.id === gameState.user.id) || {};
@@ -799,7 +502,6 @@
                 case 'leaderDiscussion': phaseContent = renderDiscussionPhase(game, currentPlayer, isLeader); break;
                 case 'nomination': phaseContent = renderNominationPhase(game, currentPlayer, isLeader); break;
                 case 'voting': phaseContent = renderVotingPhase(game, currentPlayer, isLeader); break;
-                case 'leaderSelection': phaseContent = renderLeaderSelectionPhase(game, currentPlayer, isLeader); break;
                 case 'missionTeamSelection': phaseContent = renderMissionTeamSelectionPhase(game, currentPlayer, isLeader); break;
                 case 'missionVoting': phaseContent = renderMissionVotingPhase(game, currentPlayer, isLeader, isSpy); break;
                 case 'missionResults': phaseContent = renderMissionResultsPhase(game, currentPlayer, isLeader); break;
@@ -810,44 +512,19 @@
             return `
                 <div class="max-w-6xl mx-auto">
                     <div class="flex flex-col md:flex-row justify-between items-start md:items-center mb-8">
-                        <div>
-                            <h1 class="text-3xl font-bold text-blue-400">Игра в Сопротивление</h1>
-                            <p class="text-gray-300">Комната: ${gameState.currentRoom?.name || ''}</p>
-                        </div>
+                        <div><h1 class="text-3xl font-bold text-blue-400">Игра</h1><p class="text-gray-300">Миссия ${game.currentMission}</p></div>
                         <div class="flex items-center space-x-4 mt-4 md:mt-0">
-                            <div class="bg-gray-800 border border-gray-700 rounded-lg px-4 py-2">
-                                <p class="text-sm text-gray-400">Миссия</p>
-                                <p class="text-xl font-bold text-yellow-400">${game.currentMission} / 5</p>
-                            </div>
-                            <div class="bg-gray-800 border border-gray-700 rounded-lg px-4 py-2">
-                                <p class="text-sm text-gray-400">Успехов</p>
-                                <p class="text-xl font-bold text-green-400">${game.successfulMissions}</p>
-                            </div>
-                            <div class="bg-gray-800 border border-gray-700 rounded-lg px-4 py-2">
-                                <p class="text-sm text-gray-400">Провалов</p>
-                                <p class="text-xl font-bold text-red-400">${game.failedMissions}</p>
-                            </div>
-                            <button onclick="returnToLobby()" class="bg-gradient-to-r from-red-600 to-red-700 hover:from-red-700 hover:to-red-800 text-white font-semibold py-2 px-4 rounded-lg transition">
-                                <i class="fas fa-times mr-2"></i>Выйти
-                            </button>
+                            <div class="bg-gray-800 px-4 py-2 rounded"><p class="text-sm text-gray-400">Успех</p><p class="text-green-400 font-bold">${game.successfulMissions}</p></div>
+                            <div class="bg-gray-800 px-4 py-2 rounded"><p class="text-sm text-gray-400">Провал</p><p class="text-red-400 font-bold">${game.failedMissions}</p></div>
+                            <button onclick="returnToLobby()" class="bg-red-600 text-white py-2 px-4 rounded">Выйти</button>
                         </div>
                     </div>
-
                     <div class="mb-8">
-                        <div class="bg-gradient-to-r from-gray-800 to-gray-900 border border-gray-700 rounded-xl p-4">
-                            <div class="flex items-center justify-between">
-                                <div class="flex items-center">
-                                    <div class="w-3 h-3 rounded-full ${getPhaseColor(game.phase)} mr-3"></div>
-                                    <h2 class="text-xl font-bold text-white">${getPhaseTitle(game.phase)}</h2>
-                                </div>
-                                <div class="text-lg font-bold ${getTimerColor(game)}">
-                                    ${game.phase === 'discussion' ? game.discussionTimeLeft : game.phase === 'missionTeamSelection' ? game.nominationTimeLeft : '--'} сек
-                                </div>
-                            </div>
-                            <p class="text-gray-300 mt-2">${getPhaseDescription(game.phase, game, currentPlayer)}</p>
+                        <div class="bg-gray-800 border border-gray-700 rounded-xl p-4 flex justify-between items-center">
+                            <div class="flex items-center"><div class="w-3 h-3 rounded-full ${getPhaseColor(game.phase)} mr-3"></div><h2 class="text-xl font-bold text-white">${getPhaseTitle(game.phase)}</h2></div>
+                            <div class="text-lg font-bold ${getTimerColor(game)}">${getTimerValue(game)} сек</div>
                         </div>
                     </div>
-
                     <div class="grid grid-cols-1 lg:grid-cols-3 gap-8">
                         <div class="lg:col-span-2">${phaseContent}</div>
                         <div>${renderGameSidebar(game, me, isSpy, isLeader)}</div>
@@ -855,93 +532,77 @@
                 </div>
             `;
         }
+        
+        function renderRoleRevealPhase(game) {
+            const me = game.players.find(p => p.id === gameState.user.id);
+            const isSpy = me.role === 'spy';
+            const spyPlayers = isSpy ? (gameState.spiesList || []) : [];
+            const roleName = isSpy ? 'Шпион' : 'Сопротивление';
+            const roleColor = isSpy ? 'text-red-400' : 'text-green-400';
+            const roleIcon = isSpy ? 'fa-user-secret' : 'fa-users';
+            const roleBg = isSpy ? 'from-red-500 to-red-600' : 'from-green-500 to-emerald-600';
 
-        function getPhaseColor(phase){ switch(phase){case 'discussion':return 'bg-blue-500';case 'nomination':return 'bg-purple-500';case 'voting':return 'bg-yellow-500';case 'leaderSelection':return 'bg-indigo-500';case 'missionTeamSelection':return 'bg-green-500';case 'missionVoting':return 'bg-orange-500';case 'missionResults':return 'bg-red-500';case 'tieDiscussion':return 'bg-pink-500';default:return 'bg-gray-500';} }
-        function getPhaseTitle(phase){ switch(phase){case 'discussion':return 'Обсуждение';case 'nomination':return 'Выдвижение кандидатов';case 'voting':return 'Голосование за лидера';case 'leaderSelection':return 'Выбор лидера';case 'missionTeamSelection':return 'Формирование команды миссии';case 'missionVoting':return 'Голосование за результат миссии';case 'missionResults':return 'Результаты миссии';case 'tieDiscussion':return 'Доп. обсуждение (ничья)';default:return 'Фаза';} }
-        function getPhaseDescription(phase, game, currentPlayer){
-            const playerName = currentPlayer?.name || 'игрок';
-            if (phase==='discussion') return `Сейчас говорит ${playerName}. 40 секунд на обсуждение.`;
-            if (phase==='missionTeamSelection') return 'Лидер выбирает состав миссии (80 секунд).';
-            if (phase==='missionVoting') return 'Участники миссии тайно выбирают результат.';
-            if (phase==='leaderSelection') return `${game.players.find(p=>p.isLeader)?.name || 'Лидер'} формирует команду.`;
-            if (phase==='tieDiscussion') return 'Игроки с одинаковыми голосами обсуждают по 30 секунд. Затем перевыбор.';
-            if (phase==='voting') return 'Голосование за лидера миссии.';
-            if (phase==='missionResults') return 'Озвучивание результата миссии.';
-            if (phase==='nomination') return 'Выдвижение кандидатов на лидера.';
-            return '';
+            if (me.confirmedRole) {
+                const confirmedCount = game.players.filter(p => p.confirmedRole).length;
+                return `
+                    <div class="max-w-2xl mx-auto mt-12 text-center">
+                        <div class="bg-gray-800 border border-gray-700 rounded-xl p-8 shadow-2xl">
+                             <div class="mb-6"><i class="fas fa-check-circle text-green-500 text-6xl mb-4"></i><h2 class="text-3xl font-bold text-white mb-2">Вы подтвердили роль</h2><p class="text-gray-300">Ожидание других игроков... (${confirmedCount}/${game.players.length})</p></div>
+                             <div class="w-full bg-gray-700 rounded-full h-4 mb-4"><div class="bg-blue-500 h-4 rounded-full transition-all duration-500" style="width: ${(confirmedCount/game.players.length)*100}%"></div></div>
+                        </div>
+                    </div>
+                `;
+            }
+
+            return `
+                <div class="max-w-md mx-auto mt-8">
+                     <div class="bg-gray-800 border border-gray-700 rounded-xl p-6 shadow-2xl text-center">
+                        <h2 class="text-2xl font-bold text-white mb-6">Ваша роль в игре</h2>
+                        <div class="role-card-inner relative w-full h-96 mb-6" style="transform: rotateY(0deg);">
+                             <div class="absolute inset-0 w-full h-full bg-gray-800 border-2 ${isSpy ? 'border-red-900' : 'border-green-900'} rounded-xl flex flex-col items-center justify-center shadow-xl overflow-hidden">
+                                <div class="absolute inset-0 opacity-10 ${isSpy ? 'bg-[url(\'data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHdpZHRoPSI4IiBoZWlnaHQ9IjgiPgo8cmVjdCB3aWR0aD0iOCIgaGVpZ2h0PSI4IiBmaWxsPSIjZmZmIi8+CjxwYXRoIGQ9Ik0wIDBMODIDOFpNOCAwTDAgOFoiIHN0cm9rZT0iIzAwMCIgc3Ryb2tlLXdpZHRoPSIxIi8+Cjwvc3ZnPg==\')]' : 'bg-[url(\'data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHdpZHRoPSIyMCIgaGVpZ2h0PSIyMCI+CjxjaXJjbGUgY3g9IjIiIGN5PSIyIiByPSIyIiBmaWxsPSIjZmZmIi8+Cjwvc3ZnPg==\')]'}"></div>
+                                <div class="relative z-10 flex flex-col items-center w-full px-4">
+                                    <div class="w-24 h-24 rounded-full bg-gradient-to-r ${roleBg} flex items-center justify-center text-white font-bold text-4xl mb-4 shadow-lg border-4 border-gray-800"><i class="fas ${roleIcon}"></i></div>
+                                    <h3 class="text-3xl font-black ${roleColor} uppercase tracking-wider mb-2">${roleName}</h3>
+                                    ${isSpy ? `<div class="bg-red-900/50 px-4 py-1 rounded text-red-200 font-mono text-lg mb-4 border border-red-800">Агент №${me.spyNumber}</div>` : ''}
+                                    <div class="w-full bg-gray-900/60 rounded-lg p-4 backdrop-blur-sm border border-gray-700/50">
+                                        ${isSpy ? `<p class="text-xs text-red-300 font-bold mb-2 uppercase border-b border-red-900/50 pb-1">Ваши союзники:</p><div class="space-y-2 max-h-32 overflow-y-auto custom-scrollbar">${spyPlayers.filter(s => s.id !== me.id).length > 0 ? spyPlayers.filter(s => s.id !== me.id).map(s => `<div class="flex items-center justify-between text-sm text-white bg-black/20 p-2 rounded"><span>${s.name}</span><span class="bg-red-900 px-2 rounded text-red-200 font-mono">${s.spyNumber}</span></div>`).join('') : '<span class="text-gray-400 text-sm italic">Нет других шпионов</span>'}</div>` : `<p class="text-base text-gray-300 text-center leading-relaxed">Ваша цель:<br><span class="text-green-400 font-bold text-xl">3 успешные миссии</span><br><span class="text-sm mt-2 block">Вы не знаете, кто шпионы.</span></p>`}
+                                    </div>
+                                </div>
+                             </div>
+                        </div>
+                        <button onclick="confirmRole()" class="w-full bg-gradient-to-r from-blue-600 to-indigo-700 hover:from-blue-700 hover:to-indigo-800 text-white font-bold py-4 px-6 rounded-lg text-xl shadow-lg transform hover:scale-105 transition-all"><i class="fas fa-check mr-2"></i>Я запомнил роль</button>
+                     </div>
+                </div>
+            `;
         }
-        function getTimerColor(game){ let t=0; if(game.phase==='discussion')t=game.discussionTimeLeft; if(game.phase==='missionTeamSelection')t=game.nominationTimeLeft; if(t>20)return 'text-green-400'; if(t>10)return 'text-yellow-400'; return 'text-red-400'; }
+        function confirmRole() { sendAction('confirmRole'); if(gameState.gameData){ const me=gameState.gameData.players.find(p=>p.id===gameState.user.id); if(me)me.confirmedRole=true;} renderApp(); }
 
-        // --- Phase Renderers ---
         function renderDiscussionPhase(game, currentPlayer, isLeader){
             const isCurrentPlayer = currentPlayer?.id === gameState.user.id;
             const isHost = gameState.currentRoom?.hostId === gameState.user.id;
             const isLeaderDiscussion = game.phase === 'leaderDiscussion';
             const actionName = isLeaderDiscussion ? 'passTurnLeaderDiscussion' : 'passTurn';
-            
-            // Определяем, можно ли завершить ход (текущий игрок или хост)
             const canPassTurn = isCurrentPlayer || isHost;
-            
+            const showNominationGrid = game.phase === 'discussion' || game.phase === 'nomination';
             return `
-                <div class="bg-gradient-to-br from-gray-800 to-gray-900 border border-gray-700 rounded-xl p-6 shadow-lg mb-6">
+                <div class="bg-gray-800 border border-gray-700 rounded-xl p-6 shadow-lg mb-6">
                     <div class="flex justify-between items-start mb-6">
-                        <h2 class="text-2xl font-bold text-blue-400">${isLeaderDiscussion ? 'Обсуждение команды' : 'Обсуждение'}</h2>
-                        <div class="text-right">
-                             <div class="bg-gray-900 rounded-lg px-3 py-2 inline-block">
-                                <span class="text-gray-400 text-xs uppercase block">Таймер</span>
-                                <span class="text-xl font-bold ${getTimerColor(game)}">${game.discussionTimeLeft} сек</span>
-                            </div>
-                        </div>
+                        <div><h2 class="text-2xl font-bold text-blue-400 flex items-center">${isLeaderDiscussion ? 'Обсуждение команды' : 'Обсуждение'}${game.players.find(p => p.isLeader)?.id ? `<span class="ml-3 text-sm bg-yellow-900 text-yellow-200 px-2 py-1 rounded-full border border-yellow-700"><i class="fas fa-crown mr-1"></i>Лидер: ${game.players.find(p => p.isLeader).name}</span>` : ''}</h2></div>
+                        <div class="text-right"><div class="bg-gray-900 rounded-lg px-3 py-2 inline-block"><span class="text-gray-400 text-xs uppercase block">Таймер</span><span class="text-xl font-bold ${getTimerColor(game)}">${game.discussionTimeLeft} сек</span></div></div>
                     </div>
-                    
                     <div class="mb-8 flex flex-col items-center">
-                        <div class="bg-gray-900/50 rounded-xl p-6 w-full max-w-2xl border border-gray-700/50">
+                        <div class="bg-gray-900/50 rounded-xl p-6 w-full max-w-2xl border border-gray-700/50 relative">
+                            ${isCurrentPlayer ? `<div class="absolute top-0 right-0 -mt-2 -mr-2"><span class="animate-ping absolute inline-flex h-4 w-4 rounded-full bg-blue-400 opacity-75"></span><span class="relative inline-flex rounded-full h-4 w-4 bg-blue-500"></span></div>` : ''}
                             <div class="flex flex-col items-center text-center">
-                                <div class="w-20 h-20 rounded-full bg-gradient-to-r from-blue-500 to-indigo-600 flex items-center justify-center text-white font-bold text-3xl mb-4 ring-4 ring-blue-500/30 animate-pulse">
-                                    ${(currentPlayer?.name || '?').charAt(0)}
-                                </div>
+                                <div class="relative">${currentPlayer?.isLeader ? '<div class="absolute -top-4 left-1/2 transform -translate-x-1/2 text-yellow-400 text-2xl"><i class="fas fa-crown"></i></div>' : ''}<div class="w-20 h-20 rounded-full bg-gradient-to-r from-blue-500 to-indigo-600 flex items-center justify-center text-white font-bold text-3xl mb-4 ring-4 ${isCurrentPlayer ? 'ring-blue-500 shadow-[0_0_20px_rgba(59,130,246,0.5)]' : 'ring-blue-500/30'} transition-all duration-300">${(currentPlayer?.name || '?').charAt(0)}</div></div>
                                 <h3 class="text-2xl font-bold text-white mb-1">${currentPlayer?.name || ''}</h3>
                                 <p class="text-blue-300 mb-6 font-medium">${isCurrentPlayer ? 'ВАШ ХОД! Выскажите свои мысли.' : 'Слушайте игрока'}</p>
-                                
-                                ${canPassTurn ? `
-                                    <button onclick="sendAction('${actionName}')" class="bg-gradient-to-r from-blue-600 to-indigo-700 hover:from-blue-700 hover:to-indigo-800 text-white font-semibold py-3 px-8 rounded-full transition transform hover:scale-105 shadow-lg flex items-center">
-                                        <i class="fas fa-step-forward mr-2"></i>Завершить ход
-                                    </button>
-                                    ${isHost && !isCurrentPlayer ? '<p class="text-xs text-gray-500 mt-2">(Как создатель комнаты вы можете пропустить ход)</p>' : ''}
-                                ` : `
-                                    <div class="h-2 w-full max-w-xs bg-gray-700 rounded-full overflow-hidden">
-                                        <div class="h-full bg-blue-500 transition-all duration-1000 ease-linear" style="width: ${(game.discussionTimeLeft/40)*100}%"></div>
-                                    </div>
-                                `}
+                                ${canPassTurn ? `<button onclick="sendAction('${actionName}')" class="bg-blue-600 text-white font-semibold py-3 px-8 rounded-full shadow-lg flex items-center animate-bounce-slow"><i class="fas fa-step-forward mr-2"></i>Завершить ход</button>${isHost && !isCurrentPlayer ? '<p class="text-xs text-gray-500 mt-2">(Как создатель вы можете пропустить ход)</p>' : ''}` : `<div class="h-2 w-full max-w-xs bg-gray-700 rounded-full overflow-hidden"><div class="h-full bg-blue-500 transition-all duration-1000 ease-linear" style="width: ${(game.discussionTimeLeft/40)*100}%"></div></div>`}
                             </div>
                         </div>
                     </div>
-
-                    <div class="mb-6">
-                         <div class="flex items-center justify-between mb-4">
-                            <h3 class="text-lg font-semibold text-white">Выдвижение кандидатов</h3>
-                            <p class="text-xs text-gray-400">Нажмите на игрока, чтобы выдвинуть</p>
-                         </div>
-                        
-                        <div class="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-5 gap-3">
-                            ${game.players.map((p)=>{
-                                const isCurrent = p.id === currentPlayer?.id;
-                                const isNominated = (game.nominatedPlayers||[]).includes(p.name);
-                                const isMe = p.id === gameState.user.id;
-                                
-                                return `
-                                <div onclick="handlePlayerClick('${p.name}')" class="cursor-pointer relative bg-gray-800 border ${isNominated ? 'border-purple-500 ring-1 ring-purple-500' : 'border-gray-600 hover:border-gray-400'} rounded-lg p-3 flex flex-col items-center transition-all hover:bg-gray-750 group">
-                                    ${isNominated ? '<div class="absolute top-2 right-2 text-purple-400"><i class="fas fa-check-circle"></i></div>' : ''}
-                                    <div class="w-12 h-12 rounded-full ${isCurrent ? 'bg-gradient-to-r from-blue-500 to-indigo-600' : 'bg-gray-700 group-hover:bg-gray-600'} flex items-center justify-center text-white font-bold mb-2 transition-colors">
-                                        ${isCurrent ? '<i class="fas fa-microphone"></i>' : p.name.charAt(0)}
-                                    </div>
-                                    <span class="text-sm font-semibold ${isNominated ? 'text-purple-300' : 'text-gray-300'} truncate w-full text-center">${p.name}</span>
-                                    <span class="text-xs text-gray-500">${isMe ? '(Вы)' : ''}</span>
-                                </div>
-                                `;
-                            }).join('')}
-                        </div>
-                    </div>
+                    ${showNominationGrid ? `<div class="mb-6 animate-fade-in"><div class="flex items-center justify-between mb-4"><h3 class="text-lg font-semibold text-white">Выдвижение кандидатов</h3><p class="text-xs text-gray-400">Нажмите на игрока, чтобы выдвинуть</p></div><div class="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-5 gap-3">${game.players.map((p)=>{const isCurrent=p.id===currentPlayer?.id;const isNominated=(game.nominatedPlayers||[]).includes(p.name);const isMe=p.id===gameState.user.id;const isLeader=p.isLeader;return `<div onclick="handlePlayerClick('${p.name}')" class="cursor-pointer relative bg-gray-800 border ${isNominated ? 'border-purple-500 ring-2 ring-purple-500 shadow' : 'border-gray-600 hover:border-gray-400'} rounded-lg p-3 flex flex-col items-center transition-all group select-none">${isNominated ? '<div class="absolute top-2 right-2 text-purple-400 text-xl"><i class="fas fa-check-circle"></i></div>' : ''}${isLeader ? '<div class="absolute top-2 left-2 text-yellow-400 text-sm"><i class="fas fa-crown"></i></div>' : ''}<div class="w-12 h-12 rounded-full ${isCurrent ? 'bg-blue-600 ring-2 ring-white' : 'bg-gray-700'} flex items-center justify-center text-white font-bold mb-2 transition-colors">${isCurrent ? '<i class="fas fa-microphone"></i>' : p.name.charAt(0)}</div><span class="text-sm font-semibold ${isNominated ? 'text-purple-300' : 'text-gray-300'} truncate w-full text-center">${p.name}</span><span class="text-xs text-gray-500">${isMe ? '(Вы)' : ''}</span></div>`;}).join('')}</div></div>` : ''}
                 </div>
             `;
         }
@@ -951,327 +612,118 @@
         function renderVotingPhase(game){
             const me = game.players.find(p=>p.id===gameState.user.id) || {};
             const hasVoted = !!me.voted;
+            const candidates = (game.tieCandidates && game.tieCandidates.length > 0) ? game.tieCandidates : game.nominatedPlayers;
             return `
-                <div class="bg-gradient-to-br from-gray-800 to-gray-900 border border-gray-700 rounded-xl p-6 shadow-lg">
-                    <h2 class="text-2xl font-bold text-yellow-400 mb-6">Голосование за лидера миссии</h2>
+                <div class="bg-gray-800 border border-gray-700 rounded-xl p-6 shadow-lg">
+                    <h2 class="text-2xl font-bold text-yellow-400 mb-6">Голосование за лидера</h2>
                     ${hasVoted?`<div class="bg-yellow-900/30 border border-yellow-700 rounded-lg p-4 mb-6"><div class="flex items-center"><i class="fas fa-vote-yea text-yellow-400 text-2xl mr-3"></i><div><p class="text-white font-semibold">Вы уже проголосовали</p><p class="text-yellow-300 text-sm">Ожидаем остальных...</p></div></div></div>`:''}
                     <div class="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 gap-4 mb-8">
-                        ${game.nominatedPlayers.map(name=>{
-                            const isMe = (game.players.find(p=>p.name===name)?.id===gameState.user.id);
-                            return `<div class="bg-gray-800 border ${isMe?'border-blue-500':'border-gray-700'} rounded-xl p-4 text-center"><div class="w-16 h-16 rounded-full bg-gradient-to-r from-yellow-500 to-orange-600 mx-auto flex items-center justify-center text-white font-bold text-xl mb-3">${name.charAt(0)}</div><h3 class="font-bold text-white text-lg mb-1">${name}</h3><p class="text-gray-400 text-sm mb-4">${isMe?'Вы':'Кандидат'}</p>${!hasVoted?`<button onclick="voteForLeader('${name}')" class="w-full bg-gradient-to-r from-yellow-600 to-orange-700 hover:from-yellow-700 hover:to-orange-800 text-white font-semibold py-2 px-4 rounded-lg"><i class="fas fa-check mr-2"></i>Выбрать</button>`:''}</div>`;
-                        }).join('')}
+                        ${candidates.map(name=>{const isMe=(game.players.find(p=>p.name===name)?.id===gameState.user.id);return `<div class="bg-gray-800 border ${isMe?'border-blue-500':'border-gray-700'} rounded-xl p-4 text-center"><div class="w-16 h-16 rounded-full bg-orange-600 mx-auto flex items-center justify-center text-white font-bold text-xl mb-3">${name.charAt(0)}</div><h3 class="font-bold text-white text-lg mb-1">${name}</h3><p class="text-gray-400 text-sm mb-4">${isMe?'Вы':'Кандидат'}</p>${!hasVoted?`<button onclick="voteForLeader('${name}')" class="w-full bg-yellow-600 text-white font-semibold py-2 px-4 rounded-lg"><i class="fas fa-check mr-2"></i>Выбрать</button>`:''}</div>`;}).join('')}
                     </div>
                     <div class="text-center"><p class="text-gray-400">Проголосовали: ${Object.keys(game.votes).length} из ${game.players.length}</p></div>
                 </div>
             `;
         }
-
-        function renderLeaderSelectionPhase(game){
-            const leader = game.players.find(p=>p.isLeader);
-            const missionName = getMissionName(game.currentMission);
-            const isLeader = leader?.id === gameState.user.id;
-            return `
-                <div class="bg-gradient-to-br from-gray-800 to-gray-900 border border-gray-700 rounded-xl p-6 shadow-lg">
-                    <h2 class="text-2xl font-bold text-indigo-400 mb-6">Лидер миссии выбран!</h2>
-                    <div class="flex flex-col items-center text-center mb-8">
-                        <div class="w-24 h-24 rounded-full bg-gradient-to-r from-indigo-500 to-purple-600 flex items-center justify-center text-white font-bold text-3xl mb-4">${leader?.name?.charAt(0) || 'Л'}</div>
-                        <h3 class="font-bold text-white text-2xl mb-2">${leader?.name || 'Лидер'}</h3>
-                        <p class="text-gray-300 text-lg">теперь лидер миссии №${game.currentMission}</p>
-                    </div>
-                    <div class="bg-indigo-900/30 border border-indigo-700 rounded-xl p-5 mb-8">
-                        <div class="flex items-center mb-3"><i class="fas fa-bullseye text-indigo-400 text-xl mr-3"></i><h4 class="text-xl font-bold text-white">Миссия: ${missionName}</h4></div>
-                        <p class="text-gray-300">Лидер должен выбрать ${game.missionSizes[game.currentMission - 1]} игрока(ов) для участия в миссии.</p>
-                    </div>
-                    <div class="text-center">
-                        ${isLeader?`<button onclick="startMissionTeamSelection()" class="bg-gradient-to-r from-green-600 to-emerald-700 hover:from-green-700 hover:to-emerald-800 text-white font-semibold py-3 px-8 rounded-lg text-lg"><i class="fas fa-play mr-2"></i>Начать формирование команды</button>`:`<p class="text-gray-300">Ожидание начала формирования команды...</p>`}
-                    </div>
-                </div>
-            `;
-        }
-
-        function renderMissionTeamSelectionPhase(game){
-            const leader = game.players.find(p=>p.isLeader);
+        function renderLeaderSelectionPhase(game){ /* Unused */ return ''; }
+        function renderMissionTeamSelectionPhase(game, currentPlayer, isLeader){
             const missionSize = game.missionSizes[game.currentMission-1];
-            const isLeader = leader?.id===gameState.user.id;
             const currentTeamSize = game.missionTeam.length;
             const isTeamFull = currentTeamSize >= missionSize;
             return `
-                <div class="bg-gradient-to-br from-gray-800 to-gray-900 border border-gray-700 rounded-xl p-6 shadow-lg">
-                    <h2 class="text-2xl font-bold text-green-400 mb-6">Формирование команды миссии</h2>
-                    <div class="flex justify-between items-center mb-6">
-                        <div>
-                            <p class="text-gray-300">Лидер: <span class="font-bold text-white">${leader?.name || ''}</span></p>
-                            <p class="text-gray-300">Размер команды: <span class="font-bold text-white">${missionSize} игрока(ов)</span></p>
-                        </div>
-                        <div class="bg-gray-900 rounded-lg p-3">
-                            <div class="flex justify-between items-center mb-1"><span class="text-gray-300">Оставшееся время:</span><span class="text-xl font-bold ${getTimerColor(game)}">${game.nominationTimeLeft} сек</span></div>
-                            <div class="w-64 bg-gray-700 rounded-full h-3"><div class="bg-gradient-to-r from-green-500 to-emerald-600 h-3 rounded-full timer-bar" style="width:${(game.nominationTimeLeft/80)*100}%"></div></div>
-                        </div>
-                    </div>
-                    <div class="mb-8">
-                        <h3 class="text-lg font-semibold text-white mb-4">Выбранные игроки:</h3>
-                        ${game.missionTeam.length>0?`<div class="flex flex-wrap gap-3 mb-4">${game.missionTeam.map(n=>`<div class="bg-green-900/30 border border-green-700 rounded-full px-4 py-2 flex items-center"><i class="fas fa-user-check text-green-400 mr-2"></i><span class="text-white font-semibold">${n}</span>${isLeader?`<button onclick=\"removeFromMissionTeam('${n}')\" class=\"ml-2 text-red-400 hover:text-red-300\"><i class='fas fa-times'></i></button>`:''}</div>`).join('')}</div><p class="text-gray-400">Выбрано: ${currentTeamSize} из ${missionSize}</p>`:`<p class="text-gray-400 italic">Команда еще не сформирована</p>`}
-                    </div>
-                    ${isLeader?`
-                        <div class="mb-8">
-                            <h3 class="text-lg font-semibold text-white mb-4">Выберите игроков для миссии:</h3>
-                            <div class="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 gap-4">
-                                ${game.players.map(p=>{
-                                    const isInTeam = game.missionTeam.includes(p.name);
-                                    const isSelf = p.id===gameState.user.id;
-                                    return `<div class="bg-gray-800 border ${isInTeam?'border-green-500':'border-gray-700'} rounded-xl p-4 text-center"><div class="w-12 h-12 rounded-full ${isInTeam?'bg-gradient-to-r from-green-500 to-emerald-600':'bg-gradient-to-r from-blue-500 to-indigo-600'} mx-auto mb-3 flex items-center justify-center text-white font-bold">${p.name.charAt(0)}</div><h3 class="font-bold text-white mb-1">${p.name}</h3><p class="text-gray-400 text-sm mb-3">${isSelf?'Вы (лидер)':'Игрок'}</p><button onclick="${isInTeam?`removeFromMissionTeam('${p.name}')`:`addToMissionTeam('${p.name}')`}" class="w-full ${isInTeam?'bg-gradient-to-r from-red-600 to-red-700 hover:from-red-700 hover:to-red-800':'bg-gradient-to-r from-blue-600 to-indigo-700 hover:from-blue-700 hover:to-indigo-800'} text-white font-semibold py-2 px-4 rounded-lg" ${!isInTeam&&isTeamFull?'disabled':''}>${isInTeam?'<i class=\'fas fa-times mr-2\'></i>Убрать':'<i class=\'fas fa-plus mr-2\'></i>Добавить'}</button></div>`;
-                                }).join('')}
-                            </div>
-                        </div>
-                        <div class="flex justify-center space-x-4">
-                            <button onclick="approveMissionTeam()" class="bg-gradient-to-r from-green-600 to-emerald-700 hover:from-green-700 hover:to-emerald-800 text-white font-semibold py-3 px-8 rounded-lg text-lg" ${!isTeamFull?'disabled':''}><i class="fas fa-check-circle mr-2"></i>Утвердить состав</button>
-                            <button onclick="resetMissionTeam()" class="bg-gradient-to-r from-gray-600 to-gray-700 hover:from-gray-700 hover:to-gray-800 text-white font-semibold py-3 px-6 rounded-lg"><i class="fas fa-redo mr-2"></i>Сбросить</button>
-                        </div>
-                    `:`<div class="bg-gray-900 rounded-xl p-5"><div class="flex items-center"><i class="fas fa-hourglass-half text-green-400 text-2xl mr-3"></i><div><p class="text-white font-semibold">Ожидание формирования команды</p><p class="text-green-300">Лидер ${leader?.name || ''} выбирает игроков для миссии</p></div></div></div>`}
+                <div class="bg-gray-800 border border-gray-700 rounded-xl p-6 shadow-lg">
+                    <h2 class="text-2xl font-bold text-green-400 mb-6">Формирование команды</h2>
+                    <div class="flex justify-between items-center mb-6"><div><p class="text-gray-300">Лидер: <span class="font-bold text-white">${currentPlayer?.name || ''}</span></p><p class="text-gray-300">Нужно: <span class="font-bold text-white">${missionSize} игроков</span></p></div><div class="bg-gray-900 rounded-lg p-3"><div class="flex justify-between items-center mb-1"><span class="text-gray-300">Время:</span><span class="text-xl font-bold ${getTimerColor(game)}">${game.nominationTimeLeft} сек</span></div></div></div>
+                    <div class="mb-8"><h3 class="text-lg font-semibold text-white mb-4">Выбранные:</h3>${game.missionTeam.length>0?`<div class="flex flex-wrap gap-3 mb-4">${game.missionTeam.map(n=>`<div class="bg-green-900/30 border border-green-700 rounded-full px-4 py-2 flex items-center"><i class="fas fa-user-check text-green-400 mr-2"></i><span class="text-white font-semibold">${n}</span>${isLeader?`<button onclick=\"removeFromMissionTeam('${n}')\" class=\"ml-2 text-red-400\"><i class='fas fa-times'></i></button>`:''}</div>`).join('')}</div><p class="text-gray-400">Выбрано: ${currentTeamSize} из ${missionSize}</p>`:`<p class="text-gray-400 italic">Пусто</p>`}</div>
+                    ${isLeader?`<div class="mb-8"><h3 class="text-lg font-semibold text-white mb-4">Выберите игроков:</h3><div class="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 gap-4">${game.players.map(p=>{const isInTeam=game.missionTeam.includes(p.name);return `<div class="bg-gray-800 border ${isInTeam?'border-green-500':'border-gray-700'} rounded-xl p-4 text-center"><div class="w-12 h-12 rounded-full ${isInTeam?'bg-green-600':'bg-blue-600'} mx-auto mb-3 flex items-center justify-center text-white font-bold">${p.name.charAt(0)}</div><h3 class="font-bold text-white mb-1">${p.name}</h3><button onclick="${isInTeam?`removeFromMissionTeam('${p.name}')`:`addToMissionTeam('${p.name}')`}" class="w-full ${isInTeam?'bg-red-600':'bg-blue-600'} text-white font-semibold py-2 px-4 rounded-lg" ${!isInTeam&&isTeamFull?'disabled':''}>${isInTeam?'Убрать':'Добавить'}</button></div>`;}).join('')}</div></div><div class="flex justify-center space-x-4"><button onclick="approveMissionTeam()" class="bg-green-600 text-white font-semibold py-3 px-8 rounded-lg text-lg" ${!isTeamFull?'disabled':''}>Утвердить</button><button onclick="resetMissionTeam()" class="bg-gray-600 text-white font-semibold py-3 px-6 rounded-lg">Сброс</button></div>`:`<div class="bg-gray-900 rounded-xl p-5"><div class="flex items-center"><i class="fas fa-hourglass-half text-green-400 text-2xl mr-3"></i><div><p class="text-white font-semibold">Ожидание лидера</p></div></div></div>`}
                 </div>
             `;
         }
-
         function renderMissionVotingPhase(game, currentPlayer, isLeader, isSpy){
             const me = game.players.find(p=>p.id===gameState.user.id)||{};
             const hasVoted = me.missionVote!==null && me.missionVote!==undefined;
             const isInMission = game.missionTeam.includes(me.name||'');
-            const btnPos=[{top:'20%',left:'30%'},{top:'60%',left:'70%'},{top:'40%',left:'10%'},{top:'80%',left:'50%'},{top:'30%',left:'80%'}];
             return `
-                <div class="bg-gradient-to-br from-gray-800 to-gray-900 border border-gray-700 rounded-xl p-6 shadow-lg">
-                    <h2 class="text-2xl font-bold text-orange-400 mb-6">Голосование за результат миссии</h2>
-                    ${isInMission?`
-                        ${hasVoted?`<div class=\"bg-orange-900/30 border border-orange-700 rounded-lg p-4 mb-6\"><div class=\"flex items-center\"><i class=\"fas fa-vote-yea text-orange-400 text-2xl mr-3\"></i><div><p class=\"text-white font-semibold\">Вы уже проголосовали</p><p class=\"text-orange-300 text-sm\">Ожидание остальных участников...</p></div></div></div>`:''}
-                        <div class="relative h-96 bg-gray-900 rounded-xl overflow-hidden mb-8">
-                            <div class="absolute inset-0 flex items-center justify-center"><div class="text-center"><h3 class="text-2xl font-bold text-white mb-2">Выберите результат</h3><p class="text-gray-300">Нажмите на одну из кнопок на экране</p></div></div>
-                            ${Array.from({length:isSpy?1:2}).map((_,i)=>{const pos=btnPos[i%btnPos.length];return `<button onclick=\"voteForMission('success')\" class=\"absolute w-24 h-24 rounded-full bg-gradient-to-r from-green-500 to-emerald-600 hover:from-green-600 hover:to-emerald-700 text-white font-bold text-lg flex items-center justify-center shadow-lg transform hover:scale-110 transition-all\" style=\"top:${pos.top};left:${pos.left};\" ${hasVoted?'disabled':''}><div class=\"text-center\"><i class=\"fas fa-check text-2xl mb-1\"></i><div>Успех</div></div></button>`;}).join('')}
-                            ${isSpy?`${Array.from({length:1}).map((_,i)=>{const pos=btnPos[2+i];return `<button onclick=\"voteForMission('fail')\" class=\"absolute w-24 h-24 rounded-full bg-gradient-to-r from-red-500 to-red-600 hover:from-red-600 hover:to-red-700 text-white font-bold text-lg flex items-center justify-center shadow-lg transform hover:scale-110 transition-all\" style=\"top:${pos.top};left:${pos.left};\" ${hasVoted?'disabled':''}><div class=\"text-center\"><i class=\"fas fa-times text-2xl mb-1\"></i><div>Провал</div></div></button>`;}).join('')}`:''}
-                        </div>
-                        <div class="text-center"><p class="text-gray-400">Проголосовали: ${Object.keys(game.missionVotes).length} из ${game.missionTeam.length}</p></div>
-                    `:`<div class="bg-gray-900 rounded-xl p-5"><div class="flex items-center"><i class="fas fa-hourglass-half text-orange-400 text-2xl mr-3"></i><div><p class="text-white font-semibold">Вы не участвуете в этой миссии</p><p class="text-orange-300">Ожидание результатов голосования</p></div></div></div>`}
+                <div class="bg-gray-800 border border-gray-700 rounded-xl p-6 shadow-lg">
+                    <h2 class="text-2xl font-bold text-orange-400 mb-6">Голосование за миссию</h2>
+                    ${isInMission?`${hasVoted?`<div class="bg-orange-900/30 border border-orange-700 rounded-lg p-4 mb-6"><div class="flex items-center"><i class="fas fa-vote-yea text-orange-400 text-2xl mr-3"></i><div><p class="text-white font-semibold">Вы проголосовали</p><p class="text-orange-300 text-sm">Ожидание остальных...</p></div></div></div>`:`<div class="relative h-64 bg-gray-900 rounded-xl flex items-center justify-center gap-8"><button onclick="voteForMission('success')" class="w-32 h-32 rounded-full bg-green-600 hover:bg-green-700 text-white font-bold flex flex-col items-center justify-center shadow-lg transform hover:scale-110 transition-all"><i class="fas fa-check text-4xl mb-2"></i>Успех</button>${isSpy?`<button onclick="voteForMission('fail')" class="w-32 h-32 rounded-full bg-red-600 hover:bg-red-700 text-white font-bold flex flex-col items-center justify-center shadow-lg transform hover:scale-110 transition-all"><i class="fas fa-times text-4xl mb-2"></i>Провал</button>`:''}</div>`}`:`<div class="bg-gray-900 rounded-xl p-5"><div class="flex items-center"><i class="fas fa-hourglass-half text-orange-400 text-2xl mr-3"></i><div><p class="text-white font-semibold">Вы не в миссии</p><p class="text-orange-300">Ожидание результатов</p></div></div></div>`}
+                    <div class="text-center mt-4"><p class="text-gray-400">Проголосовали: ${Object.keys(game.missionVotes).length} из ${game.missionTeam.length}</p></div>
                 </div>
             `;
         }
-
         function renderMissionResultsPhase(game){
             const last = game.missionResults[game.missionResults.length-1]||{};
-            const missionName = getMissionName(game.currentMission-1);
             return `
-                <div class="bg-gradient-to-br from-gray-800 to-gray-900 border border-gray-700 rounded-xl p-6 shadow-lg">
-                    <h2 class="text-2xl font-bold text-red-400 mb-6">Результаты миссии №${game.currentMission-1}</h2>
+                <div class="bg-gray-800 border border-gray-700 rounded-xl p-6 shadow-lg">
+                    <h2 class="text-2xl font-bold text-red-400 mb-6">Результаты миссии ${last.mission}</h2>
                     <div class="flex flex-col items-center text-center mb-8">
-                        <div class="w-32 h-32 rounded-full ${last.success?'bg-gradient-to-r from-green-500 to-emerald-600':'bg-gradient-to-r from-red-500 to-red-600'} flex items-center justify-center text-white font-bold text-4xl mb-4">${last.success?'<i class="fas fa-check"></i>':'<i class="fas fa-times"></i>'}</div>
-                        <h3 class="font-bold text-white text-3xl mb-2">${last.success?'МИССИЯ УСПЕШНА!':'МИССИЯ ПРОВАЛЕНА!'}</h3>
-                        <p class="text-gray-300 text-xl">${missionName}</p>
+                        <div class="w-32 h-32 rounded-full ${last.success?'bg-green-600':'bg-red-600'} flex items-center justify-center text-white font-bold text-4xl mb-4">${last.success?'<i class="fas fa-check"></i>':'<i class="fas fa-times"></i>'}</div>
+                        <h3 class="font-bold text-white text-3xl mb-2">${last.success?'УСПЕХ!':'ПРОВАЛ!'}</h3>
                     </div>
                     <div class="grid grid-cols-1 md:grid-cols-2 gap-6 mb-8">
-                        <div class="bg-gray-900 rounded-xl p-5"><h4 class="text-lg font-bold text-white mb-3">Результаты голосования:</h4><div class="space-y-3"><div class="flex justify-between items-center"><span class="text-gray-300">Голосов за успех:</span><span class="text-2xl font-bold text-green-400">${last.successCount||0}</span></div><div class="flex justify-between items-center"><span class="text-gray-300">Голосов за провал:</span><span class="text-2xl font-bold text-red-400">${last.failCount||0}</span></div><div class="pt-3 border-t border-gray-700"><p class="text-gray-300">${last.success?'Никто не голосовал за провал':'Кто-то проголосовал за провал'}</p></div></div></div>
-                        <div class="bg-gray-900 rounded-xl p-5"><h4 class="text-lg font-bold text-white mb-3">Общий счёт игры:</h4><div class="space-y-3"><div class="flex justify-between items-center"><span class="text-gray-300">Успешных миссий:</span><span class="text-2xl font-bold text-green-400">${game.successfulMissions}</span></div><div class="flex justify-between items-center"><span class="text-gray-300">Проваленных миссий:</span><span class="text-2xl font-bold text-red-400">${game.failedMissions}</span></div><div class="pt-3 border-t border-gray-700"><p class="text-gray-300">Нужно 3 успешных или 3 провальных миссии для победы</p></div></div></div>
+                        <div class="bg-gray-900 rounded-xl p-5"><h4 class="text-lg font-bold text-white mb-3">Голоса:</h4><div class="space-y-3"><div class="flex justify-between items-center"><span class="text-gray-300">За успех:</span><span class="text-2xl font-bold text-green-400">${last.successCount||0}</span></div><div class="flex justify-between items-center"><span class="text-gray-300">За провал:</span><span class="text-2xl font-bold text-red-400">${last.failCount||0}</span></div></div></div>
+                        <div class="bg-gray-900 rounded-xl p-5"><h4 class="text-lg font-bold text-white mb-3">Общий счёт:</h4><div class="space-y-3"><div class="flex justify-between items-center"><span class="text-gray-300">Успехов:</span><span class="text-2xl font-bold text-green-400">${game.successfulMissions}</span></div><div class="flex justify-between items-center"><span class="text-gray-300">Провалов:</span><span class="text-2xl font-bold text-red-400">${game.failedMissions}</span></div></div></div>
                     </div>
-                    ${game.gameOver?`<div class="bg-gradient-to-r ${game.winner==='resistance'?'from-green-900/50 to-emerald-900/30 border-green-700':'from-red-900/50 to-red-900/30 border-red-700'} border rounded-xl p-5 mb-8 text-center"><h3 class="text-2xl font-bold text-white mb-2">ИГРА ОКОНЧЕНА!</h3><p class="text-xl ${game.winner==='resistance'?'text-green-400':'text-red-400'} font-bold mb-3">Победила команда ${game.winner==='resistance'?'СОПРОТИВЛЕНИЯ':'ШПИОНОВ'}!</p></div><div class="text-center"><button onclick="returnToLobby()" class="bg-gradient-to-r from-blue-600 to-indigo-700 hover:from-blue-700 hover:to-indigo-800 text-white font-semibold py-3 px-8 rounded-lg text-lg"><i class="fas fa-home mr-2"></i>Вернуться в лобби</button></div>`:`<div class="text-center"><button onclick="startNextMission()" class="bg-gradient-to-r from-blue-600 to-indigo-700 hover:from-blue-700 hover:to-indigo-800 text-white font-semibold py-3 px-8 rounded-lg text-lg"><i class="fas fa-forward mr-2"></i>Перейти к следующей миссии</button></div>`}
+                    ${game.gameOver?`<div class="bg-gradient-to-r ${game.winner==='resistance'?'from-green-900 to-green-800':'from-red-900 to-red-800'} rounded-xl p-5 mb-8 text-center"><h3 class="text-2xl font-bold text-white mb-2">ИГРА ОКОНЧЕНА!</h3><p class="text-xl font-bold text-white">Победила команда ${game.winner==='resistance'?'СОПРОТИВЛЕНИЯ':'ШПИОНОВ'}!</p></div><div class="text-center"><button onclick="returnToLobby()" class="bg-blue-600 text-white font-semibold py-3 px-8 rounded-lg text-lg">В лобби</button></div>`:`<div class="text-center"><button onclick="startNextMission()" class="bg-blue-600 text-white font-semibold py-3 px-8 rounded-lg text-lg">Далее</button></div>`}
                 </div>
             `;
         }
-
         function renderTieDiscussionPhase(game){
-            return `
-                <div class="bg-gradient-to-br from-gray-800 to-gray-900 border border-gray-700 rounded-xl p-6 shadow-lg">
-                    <h2 class="text-2xl font-bold text-pink-400 mb-6">Ничья на голосовании</h2>
-                    <p class="text-gray-300 mb-4">Игроки: ${(game.tieCandidates||[]).join(', ')} поочередно получают по 30 секунд для обсуждения. После этого будет повторное голосование.</p>
-                    <div class="text-center"><button onclick="tieRevote()" class="bg-gradient-to-r from-yellow-600 to-orange-700 hover:from-yellow-700 hover:to-orange-800 text-white font-semibold py-2 px-6 rounded-lg"><i class="fas fa-undo mr-2"></i>Начать перевыбор</button></div>
-                </div>
-            `;
+            return `<div class="bg-gray-800 border border-gray-700 rounded-xl p-6 shadow-lg"><h2 class="text-2xl font-bold text-pink-400 mb-6">Ничья</h2><p class="text-gray-300 mb-4">Игроки: ${(game.tieCandidates||[]).join(', ')} обсуждают по 30 секунд. Таймер: ${game.tieTimeLeft}</p></div>`;
         }
 
         function renderGameSidebar(game, me, isSpy, isLeader){
-            const spyPlayers = isSpy ? (gameState.spiesList || []) : [];
-            const userSpyNumber = me.spyNumber;
-            const roleName = isSpy ? 'Шпион' : 'Сопротивление';
-            const roleColor = isSpy ? 'text-red-400' : 'text-green-400';
-            const roleIcon = isSpy ? 'fa-user-secret' : 'fa-users';
-            const roleBg = isSpy ? 'from-red-500 to-red-600' : 'from-green-500 to-emerald-600';
-            
             return `
                 <div class="space-y-6">
-                    <div class="bg-gradient-to-br from-gray-800 to-gray-900 border border-gray-700 rounded-xl p-6 shadow-lg">
-                        <h2 class="text-xl font-bold text-white mb-4">Ваша роль</h2>
-                        <div class="role-card cursor-pointer group" onclick="this.classList.toggle('flipped')">
-                            <div class="role-card-inner">
-                                <!-- Front (Cover) -->
-                                <div class="role-card-front flex items-center justify-center p-6 text-center bg-gray-800 border-2 border-gray-600 rounded-xl">
-                                    <div>
-                                        <div class="w-20 h-20 rounded-full bg-gray-700 flex items-center justify-center text-gray-400 text-3xl mb-4 mx-auto group-hover:scale-110 transition-transform">
-                                            <i class="fas fa-question"></i>
-                                        </div>
-                                        <h3 class="text-xl font-bold text-white mb-2">Ваша роль скрыта</h3>
-                                        <p class="text-gray-400 text-sm">Нажмите на карточку, чтобы увидеть свою роль</p>
-                                    </div>
-                                </div>
-                                <!-- Back (Reveal) -->
-                                <div class="role-card-back flex items-center justify-center p-6 text-center bg-gray-800 border-2 ${isSpy ? 'border-red-900' : 'border-green-900'} rounded-xl">
-                                    <div class="w-full">
-                                        <div class="w-20 h-20 rounded-full bg-gradient-to-r ${roleBg} flex items-center justify-center text-white font-bold text-2xl mb-4 mx-auto">
-                                            <i class="fas ${roleIcon}"></i>
-                                        </div>
-                                        <h3 class="text-2xl font-bold ${roleColor} mb-2">${roleName} ${isSpy ? '№'+(userSpyNumber||'?') : ''}</h3>
-                                        <p class="text-gray-300 mb-4">${isSpy ? 'Провалите 3 миссии' : 'Выполните 3 миссии успешно'}</p>
-                                        
-                                        ${isSpy && spyPlayers.length > 1 ? `
-                                            <div class="mt-4 pt-4 border-t border-gray-700 w-full text-left">
-                                                <p class="text-xs text-gray-500 uppercase font-bold mb-2">Ваши напарники:</p>
-                                                ${spyPlayers.filter(s => s.id !== me.id).map(s => `
-                                                    <div class="flex items-center mb-2 bg-gray-900/50 p-2 rounded">
-                                                        <div class="w-6 h-6 rounded-full bg-red-700 flex items-center justify-center text-white text-xs font-bold mr-2">${s.spyNumber}</div>
-                                                        <span class="text-white text-sm">${s.name}</span>
-                                                    </div>
-                                                `).join('')}
-                                            </div>
-                                        ` : ''}
-                                        
-                                        <p class="text-gray-500 text-xs mt-4"><i class="fas fa-eye-slash mr-1"></i>Нажмите, чтобы скрыть</p>
-                                    </div>
-                                </div>
-                            </div>
-                        </div>
-                    </div>
-                    <div class="bg-gradient-to-br from-gray-800 to-gray-900 border border-gray-700 rounded-xl p-6 shadow-lg">
-                        <h2 class="text-xl font-bold text-white mb-4">Информация о миссиях</h2>
+                    <div class="bg-gray-800 border border-gray-700 rounded-xl p-6 shadow-lg">
+                        <h2 class="text-xl font-bold text-white mb-4">Миссии</h2>
                         <div class="space-y-4">
-                            <div><h3 class="text-gray-300 mb-1">Текущая миссия:</h3><p class="text-white font-bold text-lg">${getMissionName(game.currentMission)}</p></div>
-                            <div><h3 class="text-gray-300 mb-1">Размер команды:</h3><p class="text-white font-bold text-lg">${game.missionSizes[game.currentMission-1]} игрока</p></div>
-                            <div><h3 class="text-gray-300 mb-1">Особые правила:</h3><p class="text-sm text-gray-400">${game.currentMission===3 && [7,8,9].includes(game.players.length)?'Для провала нужно 2 голоса за провал':'Достаточно 1 голоса за провал'}</p></div>
+                            <div><h3 class="text-gray-300 mb-1">Текущая:</h3><p class="text-white font-bold text-lg">${getMissionName(game.currentMission)}</p></div>
                         </div>
                         <div class="mt-6 pt-6 border-t border-gray-700">
-                            ${game.missionSizes.map((size,idx)=>{const m=idx+1;const isCur=m===game.currentMission;const res=game.missionResults[idx];return `<div class=\"flex items-center justify-between ${isCur?'bg-blue-900/30 p-2 rounded':''}\"><div class=\"flex items-center\"><div class=\"w-8 h-8 rounded-full ${isCur?'bg-blue-600':res?(res.success?'bg-green-600':'bg-red-600'):'bg-gray-700'} flex items-center justify-center text-white text-sm font-bold mr-3\">${m}</div><span class=\"${isCur?'text-blue-300 font-bold':'text-gray-300'}\">Миссия ${m}: ${size} игроков</span></div>${res?`<span class=\"text-sm ${res.success?'text-green-400':'text-red-400'}\">${res.success?'✓':'✗'}</span>`:''}</div>`;}).join('')}
+                            ${game.missionSizes.map((size,idx)=>{const m=idx+1;const isCur=m===game.currentMission;const res=game.missionResults[idx];return `<div class=\"flex items-center justify-between ${isCur?'bg-blue-900/30 p-2 rounded':''}\"><div class=\"flex items-center\"><div class=\"w-8 h-8 rounded-full ${isCur?'bg-blue-600':res?(res.success?'bg-green-600':'bg-red-600'):'bg-gray-700'} flex items-center justify-center text-white text-sm font-bold mr-3\">${m}</div><span class=\"${isCur?'text-blue-300 font-bold':'text-gray-300'}\">Миссия ${m}: ${size}</span></div>${res?`<span class=\"text-sm ${res.success?'text-green-400':'text-red-400'}\">${res.success?'✓':'✗'}</span>`:''}</div>`;}).join('')}
                         </div>
                     </div>
-                    <div class="bg-gradient-to-br from-gray-800 to-gray-900 border border-gray-700 rounded-xl p-6 shadow-lg">
+                    <div class="bg-gray-800 border border-gray-700 rounded-xl p-6 shadow-lg">
                         <h2 class="text-xl font-bold text-white mb-4">Игроки</h2>
                         <div class="space-y-3">
-                            ${game.players.map(p=>{const isMe=p.id===gameState.user.id;const isLead=p.isLeader;const inTeam=(game.missionTeam||[]).includes(p.name);const isNom=(game.nominatedPlayers||[]).includes(p.name);return `<div class=\"flex items-center justify-between ${isMe?'bg-blue-900/30 p-2 rounded':''}\"><div class=\"flex items-center\"><div class=\"w-10 h-10 rounded-full ${isLead?'bg-gradient-to-r from-yellow-500 to-orange-600':isMe?'bg-gradient-to-r from-blue-500 to-indigo-600':'bg-gray-700'} flex items-center justify-center text-white font-bold mr-3\">${p.name.charAt(0)}</div><div><h3 class=\"font-semibold ${isMe?'text-blue-300':'text-white'}\">${p.name}</h3><p class=\"text-xs text-gray-400\">${isLead?'Лидер':isMe?'Вы':'Игрок'}${inTeam?' • В миссии':''}${isNom?' • Кандидат':''}</p></div></div>${isSpy && p.id!==gameState.user.id && (gameState.spiesList||[]).some(s=>s.id===p.id)?`<div class=\"w-6 h-6 rounded-full bg-red-600 flex items-center justify-center text-white text-xs font-bold\">${(gameState.spiesList.find(s=>s.id===p.id)||{}).spyNumber||''}</div>`:''}</div>`;}).join('')}
+                            ${game.players.map(p=>{const isMe=p.id===gameState.user.id;const isLead=p.isLeader;const inTeam=(game.missionTeam||[]).includes(p.name);const isNom=(game.nominatedPlayers||[]).includes(p.name);return `<div class="flex items-center justify-between ${isMe?'bg-blue-900/30 p-2 rounded':''}"><div class="flex items-center"><div class="relative"><div class="w-10 h-10 rounded-full ${isLead?'bg-yellow-600 ring-2 ring-yellow-400':isMe?'bg-blue-600':'bg-gray-700'} flex items-center justify-center text-white font-bold mr-3">${p.name.charAt(0)}</div>${isLead ? '<div class="absolute -top-1 -right-1 text-yellow-400 text-xs bg-gray-800 rounded-full px-1"><i class="fas fa-crown"></i></div>' : ''}</div><div><h3 class="font-semibold ${isMe?'text-blue-300':'text-white'} flex items-center">${p.name}${isLead ? '<span class="ml-2 text-xs text-yellow-400 font-normal"><i class="fas fa-crown mr-1"></i>Лидер</span>' : ''}</h3><p class="text-xs text-gray-400">${isMe?'Вы':'Игрок'}${inTeam?' • В миссии':''}${isNom?' • Кандидат':''}</p></div></div></div>`;}).join('')}
                         </div>
                     </div>
                 </div>
             `;
         }
 
-        function getMissionName(n){const names=["Операция 'Рассвет'","Операция 'Тишина'","Операция 'Обман'","Операция 'Восход'","Операция 'Феникс'"];return names[n-1]||`Миссия ${n}`}
-        function toggleRoleCard(){const el=document.querySelector('.role-card'); if(el) el.classList.toggle('flipped');}
+        // --- Helpers ---
+        function getPhaseColor(phase){ switch(phase){case 'discussion':return 'bg-blue-500';case 'leaderDiscussion':return 'bg-blue-500';case 'nomination':return 'bg-purple-500';case 'voting':return 'bg-yellow-500';case 'missionTeamSelection':return 'bg-green-500';case 'missionVoting':return 'bg-orange-500';case 'missionResults':return 'bg-red-500';case 'tieDiscussion':return 'bg-pink-500';default:return 'bg-gray-500';} }
+        function getPhaseTitle(phase){ switch(phase){case 'discussion':return 'Обсуждение';case 'leaderDiscussion':return 'Обсуждение команды';case 'nomination':return 'Выдвижение';case 'voting':return 'Голосование';case 'missionTeamSelection':return 'Команда миссии';case 'missionVoting':return 'Голосование миссии';case 'missionResults':return 'Результаты';case 'tieDiscussion':return 'Ничья';default:return 'Фаза';} }
+        function getTimerColor(game){ return 'text-green-400'; }
+        function getTimerValue(game) { if (game.phase === 'discussion' || game.phase === 'leaderDiscussion') return game.discussionTimeLeft; if (game.phase === 'missionTeamSelection') return game.nominationTimeLeft; if (game.phase === 'tieDiscussion') return game.tieTimeLeft; return 0; }
+        function getMissionName(n){const names=["Рассвет","Тишина","Обман","Восход","Феникс"];return names[n-1]||`Миссия ${n}`}
+        function getSpyCount(pc){ pc=parseInt(pc); if(pc===5) return 2; if(pc===6) return 2; if(pc===7) return 3; if(pc===8) return 3; if(pc===9) return 3; return 2; }
+        function getResistanceCount(pc){ return pc - getSpyCount(pc); }
+        function showHelp() { alert(`Инструкция...`); }
+        function promptServerUrl(){ const c = wsUrl(); const i = prompt('Сервер:', c); if (i) { localStorage.setItem('resistanceServerWsUrl', i); gameState.serverWsUrl = i; connectWS(); } }
+        function reconnectNow(){ connectWS(); }
 
-        // --- Client actions -> server
+        // Actions
         function passTurn() { sendAction('passTurn'); }
-
+        function sendAction(name, extra = {}) { sendWS({ type: 'action', action: { name, ...extra } }); }
         function handlePlayerClick(playerName) {
             const game = gameState.gameData;
             if (!game) return;
-            const me = game.players.find(p => p.id === gameState.user.id);
-            if (!me) return;
-
             if (game.phase === 'discussion' || game.phase === 'nomination') {
                 const isNominated = (game.nominatedPlayers || []).includes(playerName);
-                if (isNominated) {
-                    // Если игрок номинирован и я его номинировал (или я номинирован и я нажал на себя)
-                    // В текущей реализации сервера логика removeNomination принимает имя игрока.
-                    // Клиент не знает, КТО именно номинировал этого игрока (сервер хранит список имен, но не связку кто-кого).
-                    // Но по правилам: "у каждого игрока не более одного активного выдвижения".
-                    // Попробуем отправить снятие номинации.
-                    sendAction('removeNomination', { playerName });
-                } else {
-                    if (playerName === me.name) {
-                        sendAction('nominateSelf');
-                    } else {
-                        sendAction('nominateOther', { playerName });
-                    }
-                }
-            } else if (game.phase === 'missionTeamSelection') {
-                 if (me.isLeader) {
-                     const isInTeam = (game.missionTeam || []).includes(playerName);
-                     if (isInTeam) {
-                         sendAction('removeFromMissionTeam', { playerName });
-                     } else {
-                         sendAction('addToMissionTeam', { playerName });
-                     }
-                 }
+                if (isNominated) { sendAction('removeNomination', { playerName }); } else { if (playerName === gameState.user.name) sendAction('nominateSelf'); else sendAction('nominateOther', { playerName }); }
             }
         }
-
-        // Удалены функции старого чата и старые модальные окна номинации, так как теперь все через клик
-        function nominateSelf(){ sendAction('nominateSelf'); } // оставлено для совместимости если где-то есть вызов
-        function removeNomination(name){ sendAction('removeNomination',{playerName:name}); }
         function voteForLeader(name){ sendAction('voteForLeader',{playerName:name}); }
-        function startMissionTeamSelection(){ sendAction('startMissionTeamSelection'); }
         function addToMissionTeam(name){ sendAction('addToMissionTeam',{playerName:name}); }
         function removeFromMissionTeam(name){ sendAction('removeFromMissionTeam',{playerName:name}); }
         function resetMissionTeam(){ sendAction('resetMissionTeam'); }
         function approveMissionTeam(){ sendAction('approveMissionTeam'); }
-        function voteForMission(vote){ sendAction('voteForMission',{vote}); }
+        function voteForMission(vote){ if(gameState.gameData){const me=gameState.gameData.players.find(p=>p.id===gameState.user.id);if(me)me.missionVote=vote;} renderApp(); sendAction('voteForMission',{vote}); }
         function startNextMission(){ sendAction('startNextMission'); }
-        function tieRevote(){ sendAction('tieRevote'); }
         function returnToLobby(){ gameState.currentRoom=null; gameState.gameData=null; gameState.currentView='lobby'; renderApp(); }
-
-        // Connection utilities
-        function promptServerUrl(){
-            const current = wsUrl();
-            const input = prompt('Укажите адрес WebSocket сервера:', current);
-            if (input && typeof input === 'string') {
-                let trimmed = input.trim();
-                if (trimmed.startsWith('https://')) {
-                    trimmed = trimmed.replace('https://', 'wss://');
-                } else if (trimmed.startsWith('http://')) {
-                    trimmed = trimmed.replace('http://', 'ws://');
-                } else if (!trimmed.startsWith('ws://') && !trimmed.startsWith('wss://')) {
-                    // Try to guess protocol based on hostname or default to wss
-                    if (trimmed.includes('localhost') || trimmed.includes('127.0.0.1')) {
-                        trimmed = 'ws://' + trimmed;
-                    } else {
-                        trimmed = 'wss://' + trimmed;
-                    }
-                }
-                
-                localStorage.setItem('resistanceServerWsUrl', trimmed);
-                gameState.serverWsUrl = trimmed;
-                connectWS();
-                renderApp();
-            }
-        }
-        function reconnectNow(){ connectWS(); }
-        
-        function showHelp() {
-            alert(`ПОШАГОВАЯ ИНСТРУКЦИЯ ПО ЗАПУСКУ:
-
-1. ДЛЯ ЛОКАЛЬНОГО ТЕСТИРОВАНИЯ:
-   - Установите Node.js с сайта nodejs.org (версия 14 или выше)
-   - Откройте терминал в папке с игрой
-   - Выполните команды:
-     npm install
-     npm start
-   - После запуска сервера откройте браузер по адресу:
-     http://localhost:8080
-
-2. ДЛЯ ИГРЫ С ДРУЗЬЯМИ ЧЕРЕЗ ИНТЕРНЕТ:
-   - Используйте публичный сервер: wss://test-pul.onrender.com
-   - Откройте файл index.html на любом хостинге (GitHub Pages, Netlify и т.д.)
-   - Нажмите кнопку "Настройки" и введите адрес сервера
-   - ИЛИ добавьте параметр в URL:
-     ?server=wss://test-pul.onrender.com
-
-3. ПРИ ОТКРЫТИИ С GITHUB PAGES:
-   - Адрес сервера автоматически установится на wss://test-pul.onrender.com
-   - Просто создайте комнату и пригласите друзей по ссылке
-
-4. ЕСЛИ СЕРВЕР НЕ ЗАПУСКАЕТСЯ:
-   - Проверьте, что порт 8080 не занят: PORT=8081 npm start
-   - Проверьте брандмауэр и разрешите подключения
-   - Убедитесь, что зависимости установлены: npm install
-
-Подробная инструкция в файле README.md`);
-        }
-
-        // --- Utils ---
-        function getSpyCount(pc){ pc=parseInt(pc); if(pc===5) return 2; if(pc===6) return 2; if(pc===7) return 3; if(pc===8) return 3; if(pc===9) return 3; return 2; }
-        function getResistanceCount(pc){ return pc - getSpyCount(pc); }
-
-
     </script>
 </body>
 </html>
