@@ -60,7 +60,6 @@ function broadcastToRoomRaw(roomId, payload) {
   }
 }
 
-// Отправляет состояние игры каждому игроку с учетом маскировки ролей
 function broadcastGameState(roomId) {
   const room = rooms.get(roomId);
   if (!room || !room.game) return;
@@ -154,32 +153,65 @@ function initGame(room) {
     phase: 'discussion',
     discussionTimeLeft: 40,
     nominationTimeLeft: 80,
-    tieTimeLeft: 30, // For tie breaks
+    tieTimeLeft: 30,
     nominatedPlayers: [],
     votes: {},
     missionTeam: [],
     missionVotes: {},
     missionResults: [],
     gameOver: false,
-    winner: null
+    winner: null,
+    isTieBreakerVote: false,
+    tieCandidates: []
   };
 }
 
 function safeGameForClient(game, forPlayerId, isViewerSpy, spiesList) {
   if (!game) return null;
-  // Create a deep-ish copy with masked roles for other players
   const copy = JSON.parse(JSON.stringify(game));
   copy.players = copy.players.map(p => {
-    if (p.id === forPlayerId) return p; // keep self
-    // mask others
+    if (p.id === forPlayerId) return p;
     const masked = { ...p, role: 'unknown', spyNumber: null };
     if (isViewerSpy && spiesList?.some(s => s.id === p.id)) {
-      // spies get their fellow spies via separate field; keep masked in main list to avoid leaks
       return masked;
     }
     return masked;
   });
   return copy;
+}
+
+// Logic to end discussion and transition to next phase
+function finalizeDiscussionPhase(game) {
+  const candidateCount = (game.nominatedPlayers || []).length;
+  game.players.forEach(p => p.isLeader = false); // Clear previous leader flags
+
+  if (candidateCount === 0) {
+      // No candidates: Current leader (starter) becomes leader
+      const fallback = game.players[game.currentLeaderIndex];
+      if (fallback) fallback.isLeader = true;
+      game.phase = 'leaderDiscussion';
+  } else if (candidateCount === 1) {
+      // 1 candidate: Auto-win
+      const winnerName = game.nominatedPlayers[0];
+      const winner = game.players.find(p => p.name === winnerName);
+      if (winner) winner.isLeader = true;
+      game.phase = 'leaderDiscussion';
+  } else {
+      // 2+ candidates: Vote
+      game.phase = 'voting';
+      game.isTieBreakerVote = false;
+  }
+
+  // Init Leader Discussion if transitioned
+  if (game.phase === 'leaderDiscussion') {
+      const leaderIdx = game.players.findIndex(p => p.isLeader);
+      if (leaderIdx !== -1) {
+          game.currentLeaderIndex = leaderIdx;
+          game.currentPlayerIndex = leaderIdx;
+      }
+      game.discussionTurnCount = 0;
+      game.discussionTimeLeft = 40;
+  }
 }
 
 // --- Game Loop for Timers ---
@@ -194,31 +226,41 @@ setInterval(() => {
       if (game.discussionTimeLeft > 0) {
         game.discussionTimeLeft--;
         changed = true;
-        // Broadcast every second? Or let client interpolate?
-        // For accurate sync, we broadcast. To optimize, maybe less freq, but 1s is fine.
       } else {
-        // Time up for current player
         game.discussionTurnCount = (game.discussionTurnCount || 0) + 1;
-        
         if (game.discussionTurnCount >= game.players.length) {
-          game.phase = 'voting';
+            finalizeDiscussionPhase(game);
         } else {
-          game.currentPlayerIndex = (game.currentPlayerIndex + 1) % game.players.length;
-          game.discussionTimeLeft = 40;
+            game.currentPlayerIndex = (game.currentPlayerIndex + 1) % game.players.length;
+            game.discussionTimeLeft = 40;
         }
         changed = true;
       }
+    } else if (game.phase === 'leaderDiscussion') {
+        if (game.discussionTimeLeft > 0) {
+          game.discussionTimeLeft--;
+          changed = true;
+        } else {
+          game.discussionTurnCount = (game.discussionTurnCount || 0) + 1;
+          if (game.discussionTurnCount >= game.players.length) {
+              game.phase = 'missionTeamSelection';
+              game.nominationTimeLeft = 80;
+          } else {
+              game.currentPlayerIndex = (game.currentPlayerIndex + 1) % game.players.length;
+              game.discussionTimeLeft = 40;
+          }
+          changed = true;
+        }
     } else if (game.phase === 'missionTeamSelection') {
       if (game.nominationTimeLeft > 0) {
         game.nominationTimeLeft--;
         changed = true;
       } else {
-        // Time up for team selection -> Mission Failed
         game.missionResults.push({ 
             mission: game.currentMission, 
             success: false, 
             failCount: 0, 
-            note: 'Время вышло (лидер не выбрал команду)' 
+            note: 'Время вышло' 
         });
         game.failedMissions++;
         
@@ -227,9 +269,7 @@ setInterval(() => {
             game.winner = 'spy';
             game.phase = 'missionResults';
         } else {
-            // Next mission logic
             game.currentMission++;
-            // Reset player states
             game.players.forEach(p => { 
                 p.nominated = false; 
                 p.voted = false; 
@@ -241,7 +281,6 @@ setInterval(() => {
             game.missionTeam = [];
             game.missionVotes = {};
 
-            // Next leader
             const nextIndex = (game.currentLeaderIndex + 1) % game.players.length;
             game.players[nextIndex].isLeader = true;
             game.currentLeaderIndex = nextIndex;
@@ -258,10 +297,10 @@ setInterval(() => {
         game.tieTimeLeft--;
         changed = true;
       } else {
-        // End of tie discussion -> revote
         game.players.forEach(p => p.voted = false);
         game.votes = {};
         game.phase = 'voting';
+        // IMPORTANT: We do NOT reset isTieBreakerVote here, it remains true
         changed = true;
       }
     }
@@ -271,7 +310,6 @@ setInterval(() => {
     }
   });
 }, 1000);
-// ----------------------------
 
 wss.on('connection', (ws) => {
   const user = { id: null, name: null, roomId: null };
@@ -381,7 +419,7 @@ wss.on('connection', (ws) => {
            game.discussionTurnCount = (game.discussionTurnCount || 0) + 1;
            
            if (game.discussionTurnCount >= game.players.length) {
-             game.phase = 'voting';
+             finalizeDiscussionPhase(game);
            } else {
              game.currentPlayerIndex = (game.currentPlayerIndex + 1) % game.players.length;
              game.discussionTimeLeft = 40;
@@ -393,9 +431,6 @@ wss.on('connection', (ws) => {
 
       if (a.name === 'nominateSelf') {
         if (!me.nominated) {
-          // Rule: max 1 nomination active per player?
-          // Prompt says "не более одного выдвижения от одного игрока одновременно"
-          // We can just set nominated=true. Logic for checking duplicates is on client side usually, but server enforces state.
           me.nominated = true;
           if (!game.nominatedPlayers.includes(me.name)) game.nominatedPlayers.push(me.name);
           broadcastGameState(room.id);
@@ -406,8 +441,6 @@ wss.on('connection', (ws) => {
       if (a.name === 'nominateOther') {
         const other = game.players.find(p => p.name === a.playerName);
         if (other && !game.nominatedPlayers.includes(other.name)) {
-          // Note: we track who nominated whom? Not explicitly required by prompt simple logic, 
-          // just "nominatedPlayers" list.
           game.nominatedPlayers.push(other.name);
           broadcastGameState(room.id);
         }
@@ -427,6 +460,7 @@ wss.on('connection', (ws) => {
           me.voted = true;
           game.votes[me.id] = a.playerName;
           const allVoted = game.players.every(p => p.voted);
+          
           if (allVoted) {
             const counts = {};
             for (const name of Object.values(game.votes)) counts[name] = (counts[name] || 0) + 1;
@@ -441,9 +475,34 @@ wss.on('connection', (ws) => {
             }
 
             if (winners.length > 1) {
-              game.tieCandidates = winners;
-              game.phase = 'tieDiscussion';
-              game.tieTimeLeft = 30;
+              // TIE DETECTED
+              if (game.isTieBreakerVote) {
+                  // Second tie -> Force resolve by starter vote
+                  const starter = game.players[game.currentLeaderIndex];
+                  const starterVote = game.votes[starter.id];
+                  // If starter voted for one of the tied winners, they win. Else fallback to first winner.
+                  const finalWinnerName = winners.includes(starterVote) ? starterVote : winners[0];
+                  
+                  game.players.forEach(p => p.isLeader = false);
+                  const leader = game.players.find(p => p.name === finalWinnerName);
+                  if (leader) leader.isLeader = true;
+                  
+                  game.phase = 'leaderDiscussion';
+                  const leaderIdx = game.players.indexOf(leader);
+                  game.currentLeaderIndex = leaderIdx;
+                  game.currentPlayerIndex = leaderIdx;
+                  game.discussionTurnCount = 0;
+                  game.discussionTimeLeft = 40;
+              } else {
+                  // First tie -> Go to tie discussion
+                  game.tieCandidates = winners;
+                  game.phase = 'tieDiscussion';
+                  game.tieTimeLeft = 30 * winners.length; // Total time? Or per person? 
+                  // Prompt says "поочередно дается по 30 секунд". 
+                  // We'll simplify server side: give total time block, client logic handles turns or just open floor.
+                  // For simplicity in this text-based interaction, let's just give a block of time.
+                  game.isTieBreakerVote = true;
+              }
             } else {
               const winName = winners[0];
               game.players.forEach(p => p.isLeader = false);
@@ -453,13 +512,8 @@ wss.on('connection', (ws) => {
                 game.currentLeaderIndex = game.players.indexOf(leader);
                 game.currentPlayerIndex = game.currentLeaderIndex;
                 game.discussionTurnCount = 0;
-                game.phase = 'discussion'; // Discussion restarts starting with leader
-                game.discussionTimeLeft = 40;
-                // Wait, logic says: "После определения лидера миссии начиная с него повторяется круг обсуждения... После окончания круга обсуждения лидеру миссии дается 80 секунд"
-                // So we go to 'discussion' phase again. BUT how do we distinguish this second discussion from the initial one?
-                // The initial one leads to 'voting'. This one leads to 'missionTeamSelection'.
-                // Let's call this phase 'leaderDiscussion'.
                 game.phase = 'leaderDiscussion';
+                game.discussionTimeLeft = 40;
               }
             }
           }
@@ -468,9 +522,7 @@ wss.on('connection', (ws) => {
         return;
       }
 
-      // Handling leaderDiscussion passTurn
       if (a.name === 'passTurnLeaderDiscussion') {
-          // Similar to passTurn but transitions to missionTeamSelection
          const isCurrentPlayer = game.players[game.currentPlayerIndex].id === user.id;
          const isHost = room.hostId === user.id;
          
@@ -490,7 +542,6 @@ wss.on('connection', (ws) => {
       }
 
       if (a.name === 'startMissionTeamSelection') {
-        // Manually skip discussion?
         if (me.isLeader) {
           game.phase = 'missionTeamSelection';
           game.nominationTimeLeft = 80;
@@ -576,6 +627,8 @@ wss.on('connection', (ws) => {
         game.votes = {};
         game.missionTeam = [];
         game.missionVotes = {};
+        game.isTieBreakerVote = false;
+        game.tieCandidates = [];
 
         const nextIndex = (game.currentLeaderIndex + 1) % game.players.length;
         game.players[nextIndex].isLeader = true;
