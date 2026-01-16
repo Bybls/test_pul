@@ -11,74 +11,116 @@
         .fade-in { animation: fadeIn 0.3s ease-out; }
         @keyframes fadeIn { from { opacity: 0; transform: translateY(5px); } to { opacity: 1; transform: translateY(0); } }
         .card-bg { background-color: #1f2937; border: 1px solid #374151; border-radius: 0.75rem; }
+        
+        /* Role Card Styles */
+        .role-card { perspective: 1000px; }
+        .role-card-inner { position: relative; width: 100%; height: 100%; text-align: center; transition: transform 0.8s; transform-style: preserve-3d; }
+        .role-card-front, .role-card-back { position: absolute; width: 100%; height: 100%; -webkit-backface-visibility: hidden; backface-visibility: hidden; border-radius: 0.75rem; }
+        .role-card-back { transform: rotateY(180deg); }
     </style>
 </head>
 <body>
     <div id="app" class="min-h-screen flex flex-col items-center justify-center p-4">
-        <div class="text-blue-400 animate-pulse text-xl font-bold"><i class="fas fa-circle-notch fa-spin mr-2"></i>Загрузка...</div>
+        <div class="text-blue-400 animate-pulse text-xl font-bold"><i class="fas fa-circle-notch fa-spin mr-2"></i>Загрузка приложения...</div>
     </div>
 
     <script>
         // --- State ---
         const state = {
-            view: 'login', // login, lobby, room, game-role, game
-            user: JSON.parse(localStorage.getItem('res_user') || 'null'),
+            view: 'login', // login, connecting, lobby, room, role-reveal, game
+            user: null,
             ws: null,
             connected: false,
+            serverUrl: localStorage.getItem('res_ws_url') || computeDefaultUrl(),
             rooms: [],
             currentRoom: null,
             game: null,
             spies: [],
-            serverUrl: localStorage.getItem('res_ws_url') || 'wss://test-pul.onrender.com',
             error: null
         };
 
-        // --- Utils ---
+        // --- Helpers ---
+        function computeDefaultUrl() {
+            if (location.protocol === 'https:') return 'wss://test-pul.onrender.com';
+            return 'ws://localhost:8080';
+        }
+        
         const $ = id => document.getElementById(id);
         const send = (type, payload = {}) => {
             if (state.ws && state.ws.readyState === 1) state.ws.send(JSON.stringify({ type, ...payload }));
         };
         const action = (name, data = {}) => send('action', { action: { name, ...data } });
 
-        // --- Views ---
+        // --- Main Render ---
         function render() {
             const app = $('app');
             if (!app) return;
-            
+
+            // 1. Error Screen
             if (state.error) {
                 app.innerHTML = `
-                    <div class="card-bg p-6 max-w-sm text-center shadow-xl">
+                    <div class="card-bg p-6 max-w-sm text-center shadow-xl w-full">
                         <div class="text-red-500 text-5xl mb-4"><i class="fas fa-exclamation-circle"></i></div>
                         <h2 class="text-xl font-bold mb-2">Ошибка</h2>
-                        <p class="text-gray-400 mb-6">${state.error}</p>
-                        <button onclick="location.reload()" class="bg-gray-700 hover:bg-gray-600 text-white px-6 py-2 rounded-lg w-full">Перезагрузить</button>
+                        <p class="text-gray-400 mb-6 break-words text-sm">${state.error}</p>
+                        <div class="grid grid-cols-2 gap-2">
+                            <button onclick="location.reload()" class="bg-gray-700 hover:bg-gray-600 text-white px-4 py-2 rounded-lg">Перезагрузить</button>
+                            <button onclick="hardReset()" class="bg-red-800 hover:bg-red-700 text-white px-4 py-2 rounded-lg">Полный сброс</button>
+                        </div>
                     </div>`;
                 return;
             }
 
+            // 2. Login Screen (if no user)
+            if (!state.user) {
+                renderLogin();
+                return;
+            }
+
+            // 3. Connecting Screen (if user exists but not connected)
             if (!state.connected) {
                 app.innerHTML = `
                     <div class="card-bg p-8 max-w-sm w-full text-center fade-in">
                         <h1 class="text-3xl font-bold text-blue-500 mb-2">Сопротивление</h1>
-                        <p class="text-gray-400 mb-6">Подключение к серверу...</p>
-                        <div class="flex justify-center mb-6">
+                        <p class="text-gray-400 mb-2">Подключение к серверу...</p>
+                        
+                        <div class="flex justify-center mb-6 py-4">
                             <i class="fas fa-circle-notch fa-spin text-4xl text-blue-500"></i>
                         </div>
-                        <p class="text-xs text-gray-500 break-all mb-4">${state.serverUrl}</p>
-                        <button onclick="changeServer()" class="text-blue-400 text-sm hover:underline">Изменить сервер</button>
+                        
+                        <div class="bg-gray-900 rounded p-2 mb-6 text-xs text-gray-500 font-mono break-all border border-gray-700">
+                            ${state.serverUrl}
+                        </div>
+
+                        <div class="space-y-3">
+                            <button onclick="changeServer()" class="w-full bg-gray-700 hover:bg-gray-600 text-white py-2 rounded-lg transition-colors border border-gray-600">
+                                <i class="fas fa-server mr-2"></i>Изменить адрес
+                            </button>
+                            <button onclick="logout()" class="w-full text-red-400 text-sm hover:text-red-300 py-1">
+                                Сброс (Выход)
+                            </button>
+                        </div>
+                        
+                         <div class="mt-6 pt-4 border-t border-gray-700">
+                             <button onclick="hardReset()" class="text-xs text-gray-600 hover:text-red-500">
+                                 Если ничего не помогает: Полный сброс
+                             </button>
+                         </div>
                     </div>`;
                 return;
             }
 
+            // 4. App Views
             switch (state.view) {
-                case 'login': return renderLogin();
-                case 'lobby': return renderLobby();
-                case 'room': return renderRoom();
-                case 'game-role': return renderRoleReveal();
-                case 'game': return renderGame();
-                default: app.innerHTML = '<div>Unknown View</div>';
+                case 'lobby': renderLobby(); break;
+                case 'room': renderRoom(); break;
+                case 'role-reveal': renderRoleReveal(); break;
+                case 'game': renderGame(); break;
+                default: renderLobby();
             }
         }
+
+        // --- View Functions ---
 
         function renderLogin() {
             $('app').innerHTML = `
@@ -89,15 +131,22 @@
                     <div class="space-y-4">
                         <div>
                             <label class="block text-xs font-bold text-gray-500 uppercase mb-1">Ваше имя</label>
-                            <input id="inpName" type="text" class="w-full bg-gray-900 border border-gray-700 rounded-lg px-4 py-3 text-white focus:outline-none focus:border-blue-500 transition-colors" placeholder="Введите имя" value="${state.user?.name || ''}">
+                            <input id="inpName" type="text" class="w-full bg-gray-900 border border-gray-700 rounded-lg px-4 py-3 text-white focus:outline-none focus:border-blue-500 transition-colors" placeholder="Введите имя">
                         </div>
                         <button onclick="login()" class="w-full bg-blue-600 hover:bg-blue-500 text-white font-bold py-3 rounded-lg shadow-lg transform transition active:scale-95">Войти</button>
+                        
+                        <div class="pt-4 mt-2 border-t border-gray-700 text-center">
+                            <button onclick="changeServer()" class="text-xs text-gray-500 hover:text-blue-400 flex items-center justify-center w-full">
+                                <i class="fas fa-cog mr-1"></i> Настройки сервера
+                            </button>
+                            <div class="text-[10px] text-gray-600 mt-1 truncate">${state.serverUrl}</div>
+                        </div>
                     </div>
                 </div>`;
         }
 
         function renderLobby() {
-            const roomsList = state.rooms.map(r => `
+            const list = state.rooms.length ? state.rooms.map(r => `
                 <div class="bg-gray-800 p-4 rounded-lg border border-gray-700 flex justify-between items-center hover:border-gray-500 transition-colors cursor-pointer" onclick="${r.hasPassword ? `joinPass('${r.id}')` : `join('${r.id}')`}">
                     <div>
                         <div class="font-bold text-white">${r.name}</div>
@@ -108,42 +157,45 @@
                         <span class="bg-gray-700 px-2 py-1 rounded text-xs font-mono">${r.players}/${r.maxPlayers}</span>
                     </div>
                 </div>
-            `).join('') || '<div class="text-center text-gray-500 py-8">Нет активных комнат</div>';
+            `).join('') : '<div class="text-center text-gray-500 py-8 bg-gray-800/50 rounded-lg border border-gray-700 border-dashed">Нет активных комнат</div>';
 
             $('app').innerHTML = `
-                <div class="w-full max-w-3xl fade-in p-4">
+                <div class="w-full max-w-2xl fade-in p-4">
                     <div class="flex justify-between items-center mb-8">
                         <div>
                             <h2 class="text-2xl font-bold">Лобби</h2>
-                            <p class="text-gray-400 text-sm">Привет, ${state.user.name}</p>
+                            <div class="flex items-center gap-2">
+                                <span class="w-2 h-2 rounded-full bg-green-500 animate-pulse"></span>
+                                <p class="text-gray-400 text-sm">${state.user.name}</p>
+                            </div>
                         </div>
                         <div class="flex gap-2">
                             <button onclick="showCreate()" class="bg-green-600 hover:bg-green-500 text-white px-4 py-2 rounded-lg text-sm font-bold shadow-lg"><i class="fas fa-plus mr-2"></i>Создать</button>
-                            <button onclick="logout()" class="bg-gray-700 hover:bg-gray-600 text-white px-4 py-2 rounded-lg text-sm"><i class="fas fa-sign-out-alt"></i></button>
+                            <button onclick="logout()" class="bg-gray-700 hover:bg-gray-600 text-white px-3 py-2 rounded-lg text-sm"><i class="fas fa-sign-out-alt"></i></button>
                         </div>
                     </div>
 
-                    <div id="createForm" class="hidden mb-6 card-bg p-4">
-                        <h3 class="font-bold mb-4">Новая комната</h3>
+                    <div id="createForm" class="hidden mb-6 card-bg p-4 border-l-4 border-green-600">
+                        <h3 class="font-bold mb-4 text-lg">Новая комната</h3>
                         <div class="grid grid-cols-1 md:grid-cols-2 gap-4 mb-4">
-                            <input id="cName" placeholder="Название" class="bg-gray-900 border border-gray-700 rounded px-3 py-2 w-full">
-                            <select id="cMax" class="bg-gray-900 border border-gray-700 rounded px-3 py-2 w-full">
+                            <input id="cName" placeholder="Название комнаты" class="bg-gray-900 border border-gray-700 rounded px-3 py-2 w-full focus:border-green-500 focus:outline-none">
+                            <select id="cMax" class="bg-gray-900 border border-gray-700 rounded px-3 py-2 w-full focus:border-green-500 focus:outline-none">
                                 <option value="5">5 Игроков</option>
                                 <option value="6">6 Игроков</option>
                                 <option value="7">7 Игроков</option>
                                 <option value="8" selected>8 Игроков</option>
                                 <option value="9">9 Игроков</option>
                             </select>
-                            <input id="cPass" placeholder="Пароль (необязательно)" class="bg-gray-900 border border-gray-700 rounded px-3 py-2 w-full md:col-span-2">
+                            <input id="cPass" placeholder="Пароль (необязательно)" class="bg-gray-900 border border-gray-700 rounded px-3 py-2 w-full md:col-span-2 focus:border-green-500 focus:outline-none">
                         </div>
                         <div class="flex justify-end gap-2">
-                            <button onclick="$('createForm').classList.add('hidden')" class="text-gray-400 px-4 py-2 hover:text-white">Отмена</button>
-                            <button onclick="createRoom()" class="bg-blue-600 text-white px-6 py-2 rounded-lg font-bold">Создать</button>
+                            <button onclick="$('createForm').classList.add('hidden')" class="text-gray-400 px-4 py-2 hover:text-white transition-colors">Отмена</button>
+                            <button onclick="createRoom()" class="bg-green-600 hover:bg-green-500 text-white px-6 py-2 rounded-lg font-bold shadow-md transform transition active:scale-95">Создать</button>
                         </div>
                     </div>
 
                     <div class="space-y-3">
-                        ${roomsList}
+                        ${list}
                     </div>
                 </div>`;
         }
@@ -151,44 +203,56 @@
         function renderRoom() {
             const r = state.currentRoom;
             const isHost = r.hostId === state.user.id;
-            const link = `${location.origin}?room=${r.id}&invite=${r.inviteKey}`;
+            const link = `${location.origin}${location.pathname}?room=${r.id}&invite=${r.inviteKey}`;
             
             const players = r.players.map(p => `
-                <div class="flex items-center gap-3 bg-gray-800 p-3 rounded-lg border border-gray-700">
-                    <div class="w-8 h-8 rounded-full bg-gradient-to-br from-blue-500 to-purple-600 flex items-center justify-center font-bold text-sm">
+                <div class="flex items-center gap-3 bg-gray-800 p-3 rounded-lg border border-gray-700 animate-fadeIn">
+                    <div class="w-10 h-10 rounded-full bg-gradient-to-br from-blue-500 to-purple-600 flex items-center justify-center font-bold text-white shadow-lg">
                         ${p.name[0]}
                     </div>
-                    <span>${p.name}</span>
-                    ${p.id === r.hostId ? '<i class="fas fa-crown text-yellow-500 ml-auto"></i>' : ''}
+                    <span class="font-medium">${p.name}</span>
+                    ${p.id === r.hostId ? '<i class="fas fa-crown text-yellow-500 ml-auto drop-shadow-sm"></i>' : ''}
                 </div>
             `).join('');
 
             $('app').innerHTML = `
                 <div class="max-w-2xl w-full fade-in p-4">
-                    <button onclick="leaveRoom()" class="text-gray-400 hover:text-white mb-4"><i class="fas fa-arrow-left mr-2"></i>Назад в лобби</button>
+                    <button onclick="leaveRoom()" class="text-gray-400 hover:text-white mb-6 flex items-center gap-2 transition-colors">
+                        <i class="fas fa-arrow-left"></i> Назад в лобби
+                    </button>
                     
-                    <div class="card-bg p-6 mb-6">
-                        <div class="flex justify-between items-start mb-6">
+                    <div class="card-bg p-6 mb-6 relative overflow-hidden">
+                        <div class="absolute top-0 left-0 w-full h-1 bg-gradient-to-r from-blue-500 to-purple-500"></div>
+                        
+                        <div class="flex flex-col md:flex-row justify-between items-start md:items-center mb-6 gap-4">
                             <div>
                                 <h1 class="text-3xl font-bold mb-1">${r.name}</h1>
-                                <div class="text-gray-400 text-sm">Игроков: ${r.players.length} / ${r.maxPlayers}</div>
+                                <div class="flex items-center gap-2 text-sm text-gray-400">
+                                    <i class="fas fa-users"></i>
+                                    <span>${r.players.length} / ${r.maxPlayers} игроков</span>
+                                </div>
                             </div>
-                            <button onclick="copyLink('${link}')" class="bg-gray-800 hover:bg-gray-700 text-blue-400 px-3 py-1 rounded text-xs border border-gray-600">
-                                <i class="fas fa-link mr-1"></i>Пригласить
+                            <button onclick="copyLink('${link}')" class="bg-gray-800 hover:bg-gray-700 text-blue-400 px-4 py-2 rounded-lg text-sm border border-gray-600 transition-colors flex items-center gap-2 w-full md:w-auto justify-center">
+                                <i class="fas fa-link"></i> Пригласить
                             </button>
                         </div>
 
                         <div class="grid grid-cols-1 sm:grid-cols-2 gap-3 mb-8">
                             ${players}
+                            ${Array(r.maxPlayers - r.players.length).fill(0).map(() => `
+                                <div class="flex items-center gap-3 bg-gray-800/30 p-3 rounded-lg border border-gray-700/50 border-dashed text-gray-600">
+                                    <div class="w-10 h-10 rounded-full bg-gray-800 flex items-center justify-center"><i class="fas fa-user"></i></div>
+                                    <span>Ожидание...</span>
+                                </div>
+                            `).join('')}
                         </div>
 
                         ${isHost ? `
-                            <button onclick="startGame()" ${r.players.length < 5 ? 'disabled' : ''} class="w-full bg-green-600 hover:bg-green-500 disabled:opacity-50 disabled:cursor-not-allowed text-white font-bold py-4 rounded-xl shadow-lg transition-transform active:scale-95 text-lg">
-                                НАЧАТЬ ИГРУ
+                            <button onclick="startGame()" ${r.players.length < 5 ? 'disabled' : ''} class="w-full bg-green-600 hover:bg-green-500 disabled:bg-gray-700 disabled:text-gray-500 disabled:cursor-not-allowed text-white font-bold py-4 rounded-xl shadow-lg transition-all active:scale-95 text-lg flex items-center justify-center gap-2">
+                                ${r.players.length < 5 ? `<i class="fas fa-clock"></i> Ждем игроков (${5 - r.players.length})` : '<i class="fas fa-play"></i> НАЧАТЬ ИГРУ'}
                             </button>
-                            ${r.players.length < 5 ? '<p class="text-center text-xs text-gray-500 mt-2">Минимум 5 игроков</p>' : ''}
                         ` : `
-                            <div class="text-center py-4 bg-gray-800 rounded-lg animate-pulse text-gray-400">
+                            <div class="text-center py-4 bg-gray-800 rounded-lg animate-pulse text-blue-400 font-medium border border-blue-900/50">
                                 Ожидание начала игры...
                             </div>
                         `}
@@ -201,38 +265,43 @@
             const isSpy = me.role === 'spy';
             const confirmed = me.confirmedRole;
             
-            // Spy list logic
+            // Spy Allies Logic
             let spyContent = '';
             if (isSpy) {
                 const others = state.spies.filter(s => s.id !== me.id);
                 spyContent = `
-                    <div class="mt-4 bg-red-900/30 border border-red-500/30 rounded p-4">
-                        <p class="text-red-400 text-sm font-bold mb-2 uppercase">Ваши союзники:</p>
-                        ${others.length ? others.map(s => `<div class="text-white">Agent ${s.spyNumber}: <b>${s.name}</b></div>`).join('') : '<div class="text-gray-400 text-sm">Нет других шпионов</div>'}
+                    <div class="mt-6 bg-red-900/20 border border-red-500/30 rounded-lg p-4 text-left">
+                        <p class="text-red-400 text-xs font-bold mb-3 uppercase tracking-wider">Ваши союзники:</p>
+                        ${others.length ? others.map(s => `
+                            <div class="flex items-center gap-2 text-white mb-2 last:mb-0">
+                                <span class="bg-red-900 text-red-100 text-xs px-2 py-0.5 rounded font-mono">${s.spyNumber}</span>
+                                <span class="font-bold">${s.name}</span>
+                            </div>
+                        `).join('') : '<div class="text-gray-500 text-sm italic">Вы единственный шпион</div>'}
                     </div>`;
             }
 
             $('app').innerHTML = `
                 <div class="max-w-md w-full fade-in p-4 text-center">
-                    <h2 class="text-2xl font-bold mb-6">Ваша роль</h2>
+                    <h2 class="text-2xl font-bold mb-6 text-gray-200">Ваша роль</h2>
                     
-                    <div class="card-bg p-8 mb-6 border-2 ${isSpy ? 'border-red-600' : 'border-blue-500'} relative overflow-hidden">
-                        <div class="absolute inset-0 opacity-10 ${isSpy ? 'bg-red-600' : 'bg-blue-600'}"></div>
+                    <div class="card-bg p-8 mb-6 border-2 ${isSpy ? 'border-red-600 shadow-[0_0_30px_rgba(220,38,38,0.2)]' : 'border-blue-500 shadow-[0_0_30px_rgba(59,130,246,0.2)]'} relative overflow-hidden transition-all duration-500">
                         <div class="relative z-10">
-                            <div class="text-6xl mb-4">${isSpy ? '🕵️' : '🛡️'}</div>
-                            <h1 class="text-3xl font-black uppercase mb-2 ${isSpy ? 'text-red-500' : 'text-blue-400'}">${isSpy ? 'ШПИОН' : 'СОПРОТИВЛЕНИЕ'}</h1>
-                            <p class="text-gray-300 text-sm">${isSpy ? 'Сорвите 3 миссии. Не дайте себя раскрыть.' : 'Выполните 3 миссии. Вычислите шпионов.'}</p>
+                            <div class="text-7xl mb-4 animate-bounce-slow">${isSpy ? '🕵️' : '🛡️'}</div>
+                            <h1 class="text-4xl font-black uppercase mb-3 ${isSpy ? 'text-red-500' : 'text-blue-400'} tracking-wider">${isSpy ? 'ШПИОН' : 'СОПРОТИВЛЕНИЕ'}</h1>
+                            <p class="text-gray-300 text-sm leading-relaxed">${isSpy ? 'Сорвите 3 миссии. Не дайте себя раскрыть.' : 'Выполните 3 миссии. Вычислите шпионов.'}</p>
                             ${spyContent}
                         </div>
                     </div>
 
                     ${confirmed ? `
-                        <div class="animate-pulse text-yellow-500 font-bold">
-                            <i class="fas fa-clock mr-2"></i>Ожидание других игроков...
+                        <div class="animate-pulse flex flex-col items-center justify-center p-4 bg-gray-800 rounded-lg border border-gray-700">
+                            <div class="text-yellow-500 font-bold mb-1"><i class="fas fa-clock mr-2"></i>Ожидание других игроков...</div>
+                            <div class="text-xs text-gray-500">Игра начнется, когда все подтвердят роль</div>
                         </div>
                     ` : `
-                        <button onclick="confirmRole()" class="w-full bg-gray-100 hover:bg-white text-gray-900 font-bold py-3 rounded-lg shadow-lg">
-                            Я ЗАПОМНИЛ РОЛЬ
+                        <button onclick="confirmRole()" class="w-full bg-white hover:bg-gray-100 text-gray-900 font-bold py-4 rounded-xl shadow-lg transform transition active:scale-95 flex items-center justify-center gap-2">
+                            <i class="fas fa-check-circle text-green-600"></i> Я ЗАПОМНИЛ РОЛЬ
                         </button>
                     `}
                 </div>`;
@@ -242,189 +311,264 @@
             const g = state.game;
             const me = g.you;
             
-            // --- Helper Renders ---
-            const renderTimer = (val) => `<div class="font-mono text-2xl font-bold ${val < 10 ? 'text-red-500' : 'text-white'}">${val}</div>`;
+            // Layout Components
+            const renderTimer = (val) => `<div class="font-mono text-xl font-bold ${val < 10 ? 'text-red-500 animate-pulse' : 'text-white'} bg-gray-900 px-3 py-1 rounded border border-gray-700">${val}</div>`;
             
-            const renderPhase = () => {
-                if (g.phase === 'discussion') return `
-                    <div class="text-center mb-6">
-                        <div class="text-green-400 font-bold uppercase tracking-widest text-xs mb-1">ОБСУЖДЕНИЕ</div>
-                        <div class="flex items-center justify-center gap-4">
-                            ${renderTimer(g.discussionTimeLeft)}
-                        </div>
-                        <div class="mt-2 text-sm text-gray-400">
-                             Ход: <span class="text-white font-bold">${g.players[g.currentPlayerIndex].name}</span>
-                             ${g.players[g.currentPlayerIndex].id === me.id ? '<span class="text-green-400 ml-2">(ВЫ)</span>' : ''}
-                        </div>
-                        ${(g.players[g.currentPlayerIndex].id === me.id || state.currentRoom.hostId === me.id) ? 
-                            `<button onclick="action('passTurn')" class="mt-4 bg-gray-700 hover:bg-gray-600 px-4 py-1 rounded text-xs">Завершить ход <i class="fas fa-forward ml-1"></i></button>` : ''}
-                    </div>`;
-                
-                if (g.phase === 'leaderDiscussion') return `
-                    <div class="text-center mb-6">
-                         <div class="text-blue-400 font-bold uppercase tracking-widest text-xs mb-1">ЛИДЕР ВЫБРАН</div>
-                         <div class="text-xl font-bold text-white mb-2"><i class="fas fa-crown text-yellow-500 mr-2"></i>${g.players.find(p => p.isLeader).name}</div>
-                         <p class="text-gray-400 text-sm">Лидер обсуждает команду</p>
-                         <div class="mt-2">${renderTimer(g.discussionTimeLeft)}</div>
-                         ${(g.players[g.currentPlayerIndex].id === me.id || state.currentRoom.hostId === me.id) ? 
-                            `<button onclick="action('passTurnLeaderDiscussion')" class="mt-4 bg-gray-700 hover:bg-gray-600 px-4 py-1 rounded text-xs">Завершить ход <i class="fas fa-forward ml-1"></i></button>` : ''}
+            const renderStats = () => `
+                <div class="card-bg p-4 mb-4 flex justify-between items-center">
+                    <div>
+                        <div class="text-xs text-gray-500 uppercase font-bold">Миссия ${g.currentMission}</div>
+                        <div class="text-lg font-bold text-white">${g.missionSizes[g.currentMission-1]} чел.</div>
+                    </div>
+                    <div class="flex gap-1">
+                        ${g.missionSizes.map((s, i) => {
+                            const res = g.missionResults.find(r => r.mission === i+1);
+                            let col = 'bg-gray-700 border-gray-600';
+                            let icon = '';
+                            if (res) {
+                                col = res.success ? 'bg-green-600 border-green-500' : 'bg-red-600 border-red-500';
+                                icon = res.success ? '<i class="fas fa-check text-xs"></i>' : '<i class="fas fa-times text-xs"></i>';
+                            } else if (i+1 === g.currentMission) {
+                                col = 'bg-blue-600 border-blue-500 animate-pulse';
+                            }
+                            return `<div class="w-8 h-8 rounded border ${col} flex items-center justify-center text-white font-bold text-sm shadow">${icon || i+1}</div>`;
+                        }).join('')}
+                    </div>
+                </div>`;
+
+            // Phase Renderers
+            const phaseContent = () => {
+                if (g.gameOver) return `
+                    <div class="text-center py-8 animate-bounce">
+                        <div class="text-6xl mb-4">${g.winner === 'resistance' ? '🏆' : '😈'}</div>
+                        <h1 class="text-3xl font-black mb-2 ${g.winner === 'resistance' ? 'text-blue-500' : 'text-red-500'}">
+                            ${g.winner === 'resistance' ? 'ПОБЕДА СОПРОТИВЛЕНИЯ!' : 'ПОБЕДА ШПИОНОВ!'}
+                        </h1>
+                        <p class="text-gray-400 mb-8">Игра окончена</p>
+                        <button onclick="leaveRoom()" class="bg-gray-700 hover:bg-gray-600 text-white px-8 py-3 rounded-lg font-bold shadow-lg transition-transform active:scale-95">Выйти в лобби</button>
                     </div>`;
 
-                if (g.phase === 'voting') return `
-                    <div class="text-center mb-6">
-                        <div class="text-yellow-400 font-bold uppercase tracking-widest text-xs mb-4">ГОЛОСОВАНИЕ ЗА ЛИДЕРА</div>
-                        <div class="grid grid-cols-2 gap-3 max-w-md mx-auto">
-                            ${(g.tieCandidates.length > 0 ? g.tieCandidates : g.nominatedPlayers).map(name => `
-                                <button onclick="action('voteForLeader', {candidate: '${name}'})" class="bg-gray-800 hover:bg-gray-700 border border-gray-600 p-4 rounded-xl transition-all ${me.voted ? 'opacity-50 cursor-not-allowed' : ''}">
-                                    <div class="font-bold text-lg text-white mb-1">${name}</div>
-                                    <div class="text-xs text-gray-500">Кандидат</div>
+                if (g.phase === 'discussion' || g.phase === 'leaderDiscussion') {
+                    const isLeaderPhase = g.phase === 'leaderDiscussion';
+                    const currentSpeaker = g.players[g.currentPlayerIndex];
+                    const isMyTurn = currentSpeaker.id === me.id;
+                    const isHost = state.currentRoom.hostId === me.id;
+                    
+                    return `
+                        <div class="text-center">
+                            <div class="mb-4">
+                                <span class="bg-gray-800 text-${isLeaderPhase ? 'blue' : 'green'}-400 px-3 py-1 rounded-full text-xs font-bold uppercase border border-gray-700">
+                                    ${isLeaderPhase ? 'Лидер обсуждает команду' : 'Общий круг обсуждения'}
+                                </span>
+                            </div>
+                            
+                            <div class="flex justify-center mb-6">
+                                ${renderTimer(g.discussionTimeLeft)}
+                            </div>
+
+                            <div class="bg-gray-800/50 rounded-xl p-6 mb-6 border border-gray-700 relative overflow-hidden">
+                                ${isMyTurn ? '<div class="absolute inset-0 border-2 border-green-500/50 rounded-xl animate-pulse"></div>' : ''}
+                                <div class="text-gray-400 text-sm mb-2">Ход игрока:</div>
+                                <div class="text-2xl font-bold text-white flex items-center justify-center gap-2">
+                                    ${currentSpeaker.isLeader ? '<i class="fas fa-crown text-yellow-500"></i>' : ''}
+                                    ${currentSpeaker.name}
+                                </div>
+                                ${isMyTurn ? '<div class="text-green-400 text-xs font-bold mt-2 uppercase">Ваша очередь говорить!</div>' : ''}
+                            </div>
+
+                            ${(isMyTurn || isHost) ? `
+                                <button onclick="action(g.phase === 'discussion' ? 'passTurn' : 'passTurnLeaderDiscussion')" class="w-full bg-blue-600 hover:bg-blue-500 text-white py-3 rounded-lg font-bold shadow-lg transition-transform active:scale-95">
+                                    Завершить ход <i class="fas fa-step-forward ml-2"></i>
                                 </button>
-                            `).join('')}
-                        </div>
-                        ${me.voted ? '<div class="mt-4 text-green-500 animate-pulse">Голос принят</div>' : ''}
-                    </div>`;
+                                ${isHost && !isMyTurn ? '<div class="text-xs text-gray-500 mt-2">Вы можете пропустить ход как хост</div>' : ''}
+                            ` : '<div class="text-gray-500 text-sm animate-pulse">Ожидание завершения хода...</div>'}
+                        </div>`;
+                }
 
-                if (g.phase === 'tieDiscussion') return `
-                    <div class="text-center mb-6">
-                        <div class="text-red-400 font-bold uppercase tracking-widest text-xs mb-2">НИЧЬЯ - ОБСУЖДЕНИЕ</div>
-                        <p class="text-sm text-gray-400 mb-4">Кандидаты: ${g.tieCandidates.join(', ')}</p>
-                        ${renderTimer(g.tieTimeLeft)}
-                    </div>`;
+                if (g.phase === 'voting') {
+                    return `
+                        <div class="text-center">
+                            <div class="text-yellow-400 font-bold uppercase tracking-widest text-xs mb-6">ВЫБОР ЛИДЕРА</div>
+                            <div class="grid grid-cols-1 gap-3 max-w-sm mx-auto">
+                                ${(g.tieCandidates.length > 0 ? g.tieCandidates : g.nominatedPlayers).map(name => `
+                                    <button onclick="action('voteForLeader', {candidate: '${name}'})" class="group relative bg-gray-800 hover:bg-gray-700 border border-gray-600 p-4 rounded-xl transition-all ${me.voted ? 'opacity-50 cursor-not-allowed' : 'active:scale-95'}">
+                                        <div class="flex items-center justify-between">
+                                            <span class="font-bold text-lg text-white group-hover:text-blue-400 transition-colors">${name}</span>
+                                            <i class="fas fa-vote-yea text-gray-600 group-hover:text-blue-500"></i>
+                                        </div>
+                                    </button>
+                                `).join('')}
+                            </div>
+                            ${me.voted ? '<div class="mt-4 text-green-500 font-bold animate-fadeIn"><i class="fas fa-check-circle mr-2"></i>Голос принят</div>' : ''}
+                        </div>`;
+                }
 
-                if (g.phase === 'missionTeamSelection') return `
-                    <div class="text-center mb-6">
-                        <div class="text-purple-400 font-bold uppercase tracking-widest text-xs mb-1">НАБОР КОМАНДЫ</div>
-                        <div class="text-sm text-gray-400 mb-4">Нужно выбрать: <b class="text-white">${g.missionSizes[g.currentMission-1]}</b></div>
-                        ${renderTimer(g.nominationTimeLeft)}
-                        <div class="mt-4 flex flex-wrap justify-center gap-2">
-                             ${g.missionTeam.map(n => `<span class="bg-purple-900 text-purple-200 px-3 py-1 rounded-full text-sm border border-purple-700">${n}</span>`).join('')}
-                        </div>
-                        ${me.isLeader ? `
-                            <button onclick="action('approveTeam')" ${g.missionTeam.length !== g.missionSizes[g.currentMission-1] ? 'disabled' : ''} class="mt-4 bg-green-600 disabled:opacity-50 disabled:bg-gray-700 text-white px-8 py-2 rounded-lg font-bold shadow-lg">УТВЕРДИТЬ</button>
-                        ` : '<div class="mt-4 text-gray-500 animate-pulse">Лидер выбирает...</div>'}
-                    </div>`;
+                if (g.phase === 'missionTeamSelection') {
+                    return `
+                        <div class="text-center">
+                            <div class="text-purple-400 font-bold uppercase tracking-widest text-xs mb-2">НАБОР КОМАНДЫ</div>
+                            <div class="text-gray-300 mb-6 text-sm">Лидер: <b class="text-yellow-500">${g.players.find(p => p.isLeader).name}</b></div>
+                            
+                            <div class="flex justify-center mb-6">${renderTimer(g.nominationTimeLeft)}</div>
+                            
+                            <div class="bg-gray-800 p-4 rounded-xl border border-gray-700 mb-6">
+                                <div class="text-xs text-gray-500 mb-2">Состав команды (${g.missionTeam.length}/${g.missionSizes[g.currentMission-1]})</div>
+                                <div class="flex flex-wrap justify-center gap-2 min-h-[40px]">
+                                     ${g.missionTeam.length ? g.missionTeam.map(n => `<span class="bg-purple-900 text-purple-200 px-3 py-1 rounded-full text-sm border border-purple-700 flex items-center gap-2 animate-fadeIn">${n} ${me.isLeader ? `<i onclick="event.stopPropagation()" class="fas fa-check text-xs"></i>` : ''}</span>`).join('') : '<span class="text-gray-600 text-sm italic">Никто не выбран</span>'}
+                                </div>
+                            </div>
+
+                            ${me.isLeader ? `
+                                <button onclick="action('approveTeam')" ${g.missionTeam.length !== g.missionSizes[g.currentMission-1] ? 'disabled' : ''} class="w-full bg-green-600 hover:bg-green-500 disabled:bg-gray-800 disabled:text-gray-500 disabled:cursor-not-allowed text-white px-8 py-3 rounded-lg font-bold shadow-lg transition-all">
+                                    УТВЕРДИТЬ КОМАНДУ
+                                </button>
+                                <p class="text-xs text-gray-500 mt-2">Выберите игроков из списка справа</p>
+                            ` : '<div class="text-gray-500 animate-pulse">Лидер выбирает состав...</div>'}
+                        </div>`;
+                }
 
                 if (g.phase === 'missionVoting') {
-                    const inTeam = g.missionTeam.includes(me.name);
-                    if (!inTeam) return `<div class="text-center p-8 text-gray-500">Миссия выполняется...<br>Вы наблюдатель.</div>`;
+                    if (!g.missionTeam.includes(me.name)) return `
+                        <div class="text-center py-12">
+                            <div class="text-6xl text-gray-700 mb-4"><i class="fas fa-user-astronaut"></i></div>
+                            <h2 class="text-xl font-bold text-gray-300">Миссия выполняется</h2>
+                            <p class="text-gray-500 mt-2">Участники делают свой выбор...</p>
+                        </div>`;
                     
-                    if (me.missionVote) return `<div class="text-center p-8"><div class="text-green-500 text-xl font-bold mb-2"><i class="fas fa-check-circle"></i></div><div>Выбор сделан</div><div class="text-xs text-gray-500 mt-2">Ожидание команды...</div></div>`;
+                    if (me.missionVote) return `
+                        <div class="text-center py-12">
+                            <div class="text-green-500 text-6xl mb-4 animate-bounce"><i class="fas fa-check-circle"></i></div>
+                            <h2 class="text-xl font-bold text-white">Выбор сделан</h2>
+                            <p class="text-gray-500 mt-2">Ожидание остальных участников...</p>
+                        </div>`;
 
                     const isSpy = me.role === 'spy';
+                    // Randomize buttons to prevent screen peeking
                     const btns = [];
+                    const btnClass = "flex-1 p-6 rounded-xl border-2 transition-transform active:scale-95 flex flex-col items-center gap-2";
                     
-                    const btn = (type, label, icon, color) => `
-                        <button onclick="action('voteForMission', {vote: '${type}'})" class="bg-gray-800 hover:bg-${color}-900/30 border border-${color}-900 p-6 rounded-xl flex flex-col items-center gap-2 transition-transform active:scale-95">
-                            <i class="fas ${icon} text-3xl text-${color}-500"></i>
-                            <span class="font-bold text-${color}-400">${label}</span>
+                    const successBtn = `
+                        <button onclick="action('voteForMission', {vote: 'success'})" class="${btnClass} bg-gray-800 border-green-600 hover:bg-green-900/20">
+                            <i class="fas fa-shield-alt text-4xl text-green-500"></i>
+                            <span class="font-bold text-green-400 mt-2">УСПЕХ</span>
+                        </button>`;
+                    
+                    const failBtn = `
+                        <button onclick="action('voteForMission', {vote: 'fail'})" class="${btnClass} bg-gray-800 border-red-600 hover:bg-red-900/20">
+                            <i class="fas fa-bomb text-4xl text-red-500"></i>
+                            <span class="font-bold text-red-400 mt-2">П.Р.О.В.А.Л</span>
                         </button>`;
 
+                    // Resistance sees 2 success buttons (fake choice UI to match spies visually if looked from afar? No, better just 2 success)
+                    // Actually prompt asked for buttons to be randomized. 
                     if (isSpy) {
-                        btns.push(btn('success', 'УСПЕХ', 'fa-check', 'green'));
-                        btns.push(btn('fail', 'ПРОВАЛ', 'fa-times', 'red'));
+                        btns.push(successBtn);
+                        btns.push(failBtn);
                     } else {
-                        btns.push(btn('success', 'УСПЕХ', 'fa-check', 'green'));
-                        btns.push(btn('success', 'УСПЕХ', 'fa-check', 'green'));
+                        btns.push(successBtn);
+                        // Fake duplicate success to maintain layout balance and confuse peepers?
+                        // Or just one button? Prompt said "у игроков сопротивления появляется 2 кнопки успех"
+                        btns.push(successBtn); 
                     }
                     btns.sort(() => Math.random() - 0.5);
 
                     return `
-                        <div class="text-center mb-6">
-                            <div class="text-orange-400 font-bold uppercase tracking-widest text-xs mb-8">ВЫБОР ИСХОДА МИССИИ</div>
-                            <div class="flex justify-center gap-4">
+                        <div class="text-center">
+                            <div class="text-orange-400 font-bold uppercase tracking-widest text-xs mb-8">РЕЗУЛЬТАТ МИССИИ</div>
+                            <div class="flex gap-4 h-48">
                                 ${btns.join('')}
                             </div>
+                            <p class="text-xs text-gray-500 mt-6">Ваш выбор анонимен</p>
                         </div>`;
                 }
 
                 if (g.phase === 'missionResults') {
                     const last = g.missionResults[g.missionResults.length-1];
                     const win = last.success;
-                    
-                    if (g.gameOver) {
-                         return `
-                            <div class="text-center p-8 animate-bounce">
-                                <h1 class="text-4xl font-black mb-4 ${g.winner === 'resistance' ? 'text-blue-500' : 'text-red-500'}">
-                                    ${g.winner === 'resistance' ? 'ПОБЕДА СОПРОТИВЛЕНИЯ!' : 'ПОБЕДА ШПИОНОВ!'}
-                                </h1>
-                                <button onclick="leaveRoom()" class="bg-gray-700 text-white px-6 py-3 rounded-lg">Выйти в лобби</button>
-                            </div>
-                         `;
-                    }
-
                     return `
-                        <div class="text-center mb-6">
-                            <div class="text-6xl mb-4">${win ? '✅' : '❌'}</div>
-                            <h2 class="text-3xl font-bold mb-2 ${win ? 'text-green-500' : 'text-red-500'}">${win ? 'МИССИЯ УСПЕШНА' : 'МИССИЯ ПРОВАЛЕНА'}</h2>
-                            <div class="flex justify-center gap-8 mt-6 text-sm">
-                                <div class="text-green-400">Успех: <b>${last.successCount}</b></div>
-                                <div class="text-red-400">Провал: <b>${last.failCount}</b></div>
+                        <div class="text-center py-6">
+                            <div class="text-7xl mb-6 animate-scaleIn">${win ? '✅' : '❌'}</div>
+                            <h2 class="text-3xl font-black mb-2 uppercase ${win ? 'text-green-500' : 'text-red-500'}">${win ? 'УСПЕХ' : 'ПРОВАЛ'}</h2>
+                            <div class="flex justify-center gap-8 mt-8 p-4 bg-gray-800 rounded-lg border border-gray-700">
+                                <div class="text-center">
+                                    <div class="text-2xl font-bold text-green-400">${last.successCount}</div>
+                                    <div class="text-xs text-gray-500 uppercase">За успех</div>
+                                </div>
+                                <div class="w-px bg-gray-700"></div>
+                                <div class="text-center">
+                                    <div class="text-2xl font-bold text-red-400">${last.failCount}</div>
+                                    <div class="text-xs text-gray-500 uppercase">За провал</div>
+                                </div>
                             </div>
                             ${state.currentRoom.hostId === me.id ? 
-                                `<button onclick="action('nextMission')" class="mt-8 bg-blue-600 text-white px-8 py-2 rounded-lg font-bold">Далее</button>` : 
-                                '<div class="mt-8 text-gray-500">Хост запускает след. раунд...</div>'}
+                                `<button onclick="action('nextMission')" class="mt-8 bg-blue-600 hover:bg-blue-500 text-white px-8 py-3 rounded-lg font-bold shadow-lg w-full transition-transform active:scale-95">Следующая миссия</button>` : 
+                                '<div class="mt-8 text-gray-500 animate-pulse">Хост запускает следующий раунд...</div>'}
+                        </div>`;
+                }
+                
+                if (g.phase === 'tieDiscussion') {
+                    return `
+                         <div class="text-center">
+                            <div class="text-red-400 font-bold uppercase tracking-widest text-xs mb-4">НИЧЬЯ - ДОП. ОБСУЖДЕНИЕ</div>
+                            <div class="flex justify-center mb-6">${renderTimer(g.tieTimeLeft)}</div>
+                            <div class="bg-gray-800 p-4 rounded-lg mb-4">
+                                <p class="text-sm text-gray-400 mb-2">Кандидаты:</p>
+                                <div class="font-bold text-white text-lg">${g.tieCandidates.join(', ')}</div>
+                            </div>
+                            <p class="text-xs text-gray-500">После таймера будет повторное голосование</p>
                         </div>`;
                 }
 
-                return '';
+                return '<div class="text-center text-gray-500">Загрузка фазы...</div>';
             };
 
-            // --- Main Layout ---
+            // Main Game Layout
             $('app').innerHTML = `
-                <div class="w-full max-w-5xl fade-in p-2 md:p-4 grid grid-cols-1 md:grid-cols-4 gap-4">
-                    <!-- Left Sidebar (Stats) -->
-                    <div class="hidden md:block col-span-1 space-y-4">
-                        <div class="card-bg p-4">
-                            <h3 class="text-xs font-bold text-gray-500 uppercase mb-2">Миссия ${g.currentMission}</h3>
-                            <div class="flex justify-between items-center mb-1 text-sm">
-                                <span class="text-green-400">Успех: ${g.successfulMissions}</span>
-                                <span class="text-red-400">Провал: ${g.failedMissions}</span>
-                            </div>
-                            <div class="flex gap-1 h-2 bg-gray-700 rounded overflow-hidden">
-                                ${g.missionSizes.map((s, i) => {
-                                    const res = g.missionResults.find(r => r.mission === i+1);
-                                    let col = 'bg-gray-600';
-                                    if (res) col = res.success ? 'bg-green-500' : 'bg-red-500';
-                                    else if (i+1 === g.currentMission) col = 'bg-blue-500 animate-pulse';
-                                    return `<div class="flex-1 ${col}"></div>`;
-                                }).join('')}
-                            </div>
+                <div class="w-full max-w-5xl fade-in p-2 md:p-4 grid grid-cols-1 lg:grid-cols-3 gap-4 h-[calc(100vh-2rem)] md:h-auto">
+                    <!-- Main Game Area -->
+                    <div class="lg:col-span-2 space-y-4">
+                        ${renderStats()}
+                        <div class="card-bg p-6 min-h-[400px] flex flex-col justify-center relative shadow-lg">
+                            ${phaseContent()}
                         </div>
                     </div>
 
-                    <!-- Center (Game Area) -->
-                    <div class="col-span-1 md:col-span-2 card-bg p-4 min-h-[400px] flex flex-col justify-center relative">
-                        <!-- Top Info -->
-                        <div class="absolute top-4 left-4 right-4 flex justify-between text-xs text-gray-500">
-                            <div>Mission ${g.currentMission} (${g.missionSizes[g.currentMission-1]} чел.)</div>
-                            ${g.phase.includes('mission') ? '' : `<div>Leader: ${g.players.find(p=>p.isLeader)?.name}</div>`}
-                        </div>
-                        
-                        ${renderPhase()}
-                    </div>
-
-                    <!-- Right Sidebar (Players) -->
-                    <div class="col-span-1 space-y-2 max-h-[400px] overflow-y-auto">
-                        <h3 class="text-xs font-bold text-gray-500 uppercase px-1">Игроки</h3>
+                    <!-- Sidebar Players -->
+                    <div class="lg:col-span-1 space-y-2 overflow-y-auto max-h-[30vh] lg:max-h-[600px] card-bg p-4">
+                        <h3 class="text-xs font-bold text-gray-500 uppercase mb-3">Игроки</h3>
                         ${g.players.map(p => {
                             const isLead = p.isLeader;
                             const isNom = g.nominatedPlayers.includes(p.name);
                             const inTeam = g.missionTeam.includes(p.name);
+                            const isMe = p.id === me.id;
                             
-                            // Click handler
+                            // Click Action
                             let onclick = '';
-                            if (g.phase === 'discussion' || g.phase === 'nomination') onclick = `action('nominate', {target: '${p.name}'})`;
-                            if (g.phase === 'missionTeamSelection' && me.isLeader) onclick = `action('toggleTeamMember', {target: '${p.name}'})`;
+                            let cursor = '';
+                            // Nominate during discussion
+                            if ((g.phase === 'discussion' || g.phase === 'nomination') && !g.phase.includes('leader')) {
+                                onclick = `action('nominate', {target: '${p.name}'})`;
+                                cursor = 'cursor-pointer hover:bg-gray-700';
+                            }
+                            // Select Team (Leader only)
+                            if (g.phase === 'missionTeamSelection' && me.isLeader) {
+                                onclick = `action('toggleTeamMember', {target: '${p.name}'})`;
+                                cursor = 'cursor-pointer hover:bg-gray-700';
+                            }
                             
                             return `
-                                <div onclick="${onclick}" class="flex items-center gap-2 p-2 rounded border border-transparent ${onclick ? 'hover:bg-gray-800 cursor-pointer' : ''} ${isNom ? 'border-yellow-500/50 bg-yellow-900/10' : ''} ${inTeam ? 'border-purple-500/50 bg-purple-900/10' : ''}">
+                                <div onclick="${onclick}" class="flex items-center gap-3 p-3 rounded-lg border transition-all select-none ${cursor} ${isNom ? 'border-yellow-500/50 bg-yellow-900/10' : 'border-transparent bg-gray-800/50'} ${inTeam ? 'border-purple-500/50 bg-purple-900/20' : ''}">
                                     <div class="relative">
-                                        <div class="w-8 h-8 rounded-full bg-gray-700 flex items-center justify-center text-xs font-bold">${p.name[0]}</div>
-                                        ${isLead ? '<div class="absolute -top-1 -right-1 text-yellow-500 text-xs"><i class="fas fa-crown"></i></div>' : ''}
+                                        <div class="w-8 h-8 rounded-full ${isMe ? 'bg-blue-600' : 'bg-gray-600'} flex items-center justify-center text-xs font-bold text-white shadow-sm">
+                                            ${p.name[0]}
+                                        </div>
+                                        ${isLead ? '<div class="absolute -top-1 -right-1 text-yellow-500 text-xs bg-gray-800 rounded-full px-1 shadow"><i class="fas fa-crown"></i></div>' : ''}
                                     </div>
-                                    <div class="text-sm truncate flex-1 ${p.id === me.id ? 'text-blue-400' : 'text-gray-300'}">${p.name}</div>
-                                    ${isNom ? '<i class="fas fa-hand-paper text-yellow-500 text-xs"></i>' : ''}
-                                    ${inTeam ? '<i class="fas fa-user-astronaut text-purple-400 text-xs"></i>' : ''}
+                                    <div class="flex-1 min-w-0">
+                                        <div class="text-sm font-medium truncate ${isMe ? 'text-blue-400' : 'text-gray-300'}">${p.name} ${isMe ? '(Вы)' : ''}</div>
+                                    </div>
+                                    ${isNom ? '<i class="fas fa-hand-paper text-yellow-500 text-xs" title="Кандидат"></i>' : ''}
+                                    ${inTeam ? '<i class="fas fa-user-check text-purple-400 text-xs" title="В команде"></i>' : ''}
                                 </div>
                             `;
                         }).join('')}
@@ -432,14 +576,15 @@
                 </div>`;
         }
 
-
         // --- Actions ---
         window.login = () => {
             const name = $('inpName').value.trim();
             if (!name) return alert('Введите имя');
             const id = state.user?.id || 'u_' + Math.random().toString(36).substr(2, 9);
             state.user = { id, name };
-            localStorage.setItem('res_user', JSON.stringify(state.user));
+            try {
+                localStorage.setItem('res_user', JSON.stringify(state.user));
+            } catch(e) { console.error('Storage error', e); }
             connect();
         };
 
@@ -447,9 +592,14 @@
             localStorage.removeItem('res_user');
             location.reload();
         };
+        
+        window.hardReset = () => {
+             localStorage.clear();
+             location.reload();
+        };
 
         window.changeServer = () => {
-            const url = prompt('URL сервера:', state.serverUrl);
+            const url = prompt('Введите адрес сервера (ws://... или wss://...):', state.serverUrl);
             if (url) {
                 localStorage.setItem('res_ws_url', url);
                 state.serverUrl = url;
@@ -480,13 +630,15 @@
 
         // --- Core ---
         function connect() {
-            state.view = 'lobby'; // Optimistic switch, will render loader
-            render(); 
+            state.connected = false;
+            render(); // Show connecting screen immediately
 
             try {
+                console.log('Connecting to:', state.serverUrl);
                 state.ws = new WebSocket(state.serverUrl);
                 
                 state.ws.onopen = () => {
+                    console.log('WS Open');
                     state.connected = true;
                     // Initial Hello
                     const params = new URLSearchParams(location.search);
@@ -497,57 +649,87 @@
                     const invite = params.get('invite');
                     if (roomId && invite) {
                         send('joinRoom', { roomId, inviteKey: invite });
-                        // Clear URL to prevent rejoin on reload
                         window.history.replaceState({}, document.title, "/");
                     }
                 };
 
-                state.ws.onclose = () => {
-                    state.connected = false;
-                    setTimeout(connect, 3000); // Reconnect
-                    render();
+                state.ws.onclose = (e) => {
+                    console.log('WS Close', e.code, e.reason);
+                    if (state.connected) {
+                         // Was connected, now lost connection
+                         state.connected = false;
+                         render(); // Show connecting/error
+                         // Try reconnect once quickly
+                         setTimeout(() => { if(!state.connected) connect(); }, 2000);
+                    } else {
+                        // Failed to connect initially
+                        state.connected = false;
+                        render(); // Ensure UI allows retry
+                    }
+                };
+                
+                state.ws.onerror = (e) => {
+                    console.error('WS Error', e);
+                    // On error, onclose usually follows.
                 };
 
                 state.ws.onmessage = (msg) => {
-                    const data = JSON.parse(msg.data);
-                    
-                    if (data.type === 'lobby') {
-                        state.rooms = data.rooms;
-                        if (state.view === 'lobby') render();
-                    }
-
-                    if (data.type === 'room') {
-                        state.currentRoom = data.room;
-                        if (!state.game) state.view = 'room';
-                        render();
-                    }
-                    
-                    if (data.type === 'game') {
-                        state.game = data.game;
-                        if (data.spies) state.spies = data.spies;
+                    try {
+                        const data = JSON.parse(msg.data);
                         
-                        if (state.game.phase === 'roleReveal') state.view = 'game-role';
-                        else state.view = 'game';
-                        
-                        render();
-                    }
+                        if (data.type === 'lobby') {
+                            state.rooms = data.rooms;
+                            if (state.view === 'connecting' || state.view === 'login') state.view = 'lobby';
+                            if (state.view === 'lobby') render();
+                        }
 
-                    if (data.type === 'error') {
-                        alert(data.message);
-                    }
+                        if (data.type === 'room') {
+                            state.currentRoom = data.room;
+                            if (!state.game) state.view = 'room';
+                            render();
+                        }
+                        
+                        if (data.type === 'game') {
+                            state.game = data.game;
+                            if (data.spies) state.spies = data.spies;
+                            
+                            // Routing
+                            if (state.game.phase === 'roleReveal') state.view = 'role-reveal';
+                            else state.view = 'game';
+                            
+                            render();
+                        }
+
+                        if (data.type === 'error') {
+                            alert(data.message);
+                            if (state.view === 'connecting') state.view = 'lobby'; // Fallback
+                            render();
+                        }
+                    } catch (e) { console.error('Msg Parse Error', e); }
                 };
 
             } catch (e) {
-                state.error = "Ошибка подключения: " + e.message;
+                state.error = "Ошибка создания подключения: " + e.message;
                 render();
             }
         }
 
         // Init
-        if (state.user) {
-            connect();
-        } else {
-            render();
+        try {
+             // Retrieve user safe
+             const storedUser = localStorage.getItem('res_user');
+             if (storedUser) {
+                 try { state.user = JSON.parse(storedUser); } catch(e) { localStorage.removeItem('res_user'); }
+             }
+             
+             if (state.user) {
+                 connect();
+             } else {
+                 render();
+             }
+        } catch(e) {
+             state.error = "Критическая ошибка инициализации: " + e.message;
+             render();
         }
     </script>
 </body>
