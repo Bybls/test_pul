@@ -19,8 +19,8 @@ const server = http.createServer(app);
 const wss = new WebSocketServer({ server });
 
 // In-memory state
-const rooms = new Map(); 
-const sockets = new Map(); 
+const rooms = new Map(); // roomId -> { id, name, hostId, hostName, maxPlayers, passwordHash?, createdAt, players: Map<playerId, player>, game?: {...} }
+const sockets = new Map(); // socket -> { id, name, roomId? }
 
 function cleanRoomIfEmpty(roomId) {
   const room = rooms.get(roomId);
@@ -121,7 +121,6 @@ function assignRoles(playersArr) {
     p.nominated = false;
     p.voted = false;
     p.missionVote = null;
-    p.confirmedRole = false;
   }
 }
 
@@ -142,8 +141,7 @@ function initGame(room) {
       isLeader: p.isLeader,
       nominated: false,
       voted: false,
-      missionVote: null,
-      confirmedRole: false
+      missionVote: null
     })),
     currentMission: 1,
     missionSizes,
@@ -152,7 +150,7 @@ function initGame(room) {
     currentLeaderIndex: startingIndex,
     currentPlayerIndex: startingIndex,
     discussionTurnCount: 0,
-    phase: 'roleReveal', // Start with role reveal
+    phase: 'discussion',
     discussionTimeLeft: 40,
     nominationTimeLeft: 80,
     tieTimeLeft: 30,
@@ -175,44 +173,44 @@ function safeGameForClient(game, forPlayerId, isViewerSpy, spiesList) {
     if (p.id === forPlayerId) return p;
     const masked = { ...p, role: 'unknown', spyNumber: null };
     if (isViewerSpy && spiesList?.some(s => s.id === p.id)) {
-      // Spies know spies, but we handle that via sidebar list mostly.
-      // But let's leave role unknown in main list to avoid confusion, 
-      // client uses spiesList separately.
-      // Or we can reveal it? Let's keep it consistent.
+      return masked;
     }
     return masked;
   });
   return copy;
 }
 
+// Logic to end discussion and transition to next phase
 function finalizeDiscussionPhase(game) {
   const candidateCount = (game.nominatedPlayers || []).length;
-  game.players.forEach(p => p.isLeader = false); 
+  game.players.forEach(p => p.isLeader = false); // Clear previous leader flags
 
   if (candidateCount === 0) {
-      // Fallback to current starter (who becomes leader)
+      // No candidates: Current leader (starter) becomes leader
       const fallback = game.players[game.currentLeaderIndex];
       if (fallback) fallback.isLeader = true;
-      // Index update handled by logic that sets currentPlayerIndex = currentLeaderIndex
-      game.currentPlayerIndex = game.currentLeaderIndex;
-      game.discussionTurnCount = 0;
       game.phase = 'leaderDiscussion';
-      game.discussionTimeLeft = 40;
   } else if (candidateCount === 1) {
+      // 1 candidate: Auto-win
       const winnerName = game.nominatedPlayers[0];
       const winner = game.players.find(p => p.name === winnerName);
-      if (winner) {
-          winner.isLeader = true;
-          const idx = game.players.indexOf(winner);
-          game.currentLeaderIndex = idx;
-          game.currentPlayerIndex = idx;
-      }
-      game.discussionTurnCount = 0;
+      if (winner) winner.isLeader = true;
       game.phase = 'leaderDiscussion';
-      game.discussionTimeLeft = 40;
   } else {
+      // 2+ candidates: Vote
       game.phase = 'voting';
       game.isTieBreakerVote = false;
+  }
+
+  // Init Leader Discussion if transitioned
+  if (game.phase === 'leaderDiscussion') {
+      const leaderIdx = game.players.findIndex(p => p.isLeader);
+      if (leaderIdx !== -1) {
+          game.currentLeaderIndex = leaderIdx;
+          game.currentPlayerIndex = leaderIdx;
+      }
+      game.discussionTurnCount = 0;
+      game.discussionTimeLeft = 40;
   }
 }
 
@@ -224,25 +222,35 @@ setInterval(() => {
     let changed = false;
 
     // Timer logic
-    if (game.phase === 'discussion' || game.phase === 'leaderDiscussion') {
+    if (game.phase === 'discussion') {
       if (game.discussionTimeLeft > 0) {
         game.discussionTimeLeft--;
         changed = true;
       } else {
         game.discussionTurnCount = (game.discussionTurnCount || 0) + 1;
         if (game.discussionTurnCount >= game.players.length) {
-            if (game.phase === 'leaderDiscussion') {
-                game.phase = 'missionTeamSelection';
-                game.nominationTimeLeft = 80;
-            } else {
-                finalizeDiscussionPhase(game);
-            }
+            finalizeDiscussionPhase(game);
         } else {
             game.currentPlayerIndex = (game.currentPlayerIndex + 1) % game.players.length;
             game.discussionTimeLeft = 40;
         }
         changed = true;
       }
+    } else if (game.phase === 'leaderDiscussion') {
+        if (game.discussionTimeLeft > 0) {
+          game.discussionTimeLeft--;
+          changed = true;
+        } else {
+          game.discussionTurnCount = (game.discussionTurnCount || 0) + 1;
+          if (game.discussionTurnCount >= game.players.length) {
+              game.phase = 'missionTeamSelection';
+              game.nominationTimeLeft = 80;
+          } else {
+              game.currentPlayerIndex = (game.currentPlayerIndex + 1) % game.players.length;
+              game.discussionTimeLeft = 40;
+          }
+          changed = true;
+        }
     } else if (game.phase === 'missionTeamSelection') {
       if (game.nominationTimeLeft > 0) {
         game.nominationTimeLeft--;
@@ -272,8 +280,6 @@ setInterval(() => {
             game.votes = {};
             game.missionTeam = [];
             game.missionVotes = {};
-            game.isTieBreakerVote = false;
-            game.tieCandidates = [];
 
             const nextIndex = (game.currentLeaderIndex + 1) % game.players.length;
             game.players[nextIndex].isLeader = true;
@@ -294,6 +300,7 @@ setInterval(() => {
         game.players.forEach(p => p.voted = false);
         game.votes = {};
         game.phase = 'voting';
+        // IMPORTANT: We do NOT reset isTieBreakerVote here, it remains true
         changed = true;
       }
     }
@@ -404,23 +411,7 @@ wss.on('connection', (ws) => {
 
       const a = data.action;
 
-      if (a.name === 'confirmRole') {
-          if (!me.confirmedRole) {
-              me.confirmedRole = true;
-              const allConfirmed = game.players.every(p => p.confirmedRole);
-              if (allConfirmed) {
-                  // Start Game Phase
-                  game.phase = 'discussion';
-                  game.discussionTimeLeft = 40;
-                  game.discussionTurnCount = 0;
-                  game.currentPlayerIndex = game.currentLeaderIndex;
-              }
-              broadcastGameState(room.id);
-          }
-          return;
-      }
-
-      if (a.name === 'passTurn' || a.name === 'passTurnLeaderDiscussion') {
+      if (a.name === 'passTurn') {
         const isCurrentPlayer = game.players[game.currentPlayerIndex].id === user.id;
         const isHost = room.hostId === user.id;
         
@@ -428,12 +419,7 @@ wss.on('connection', (ws) => {
            game.discussionTurnCount = (game.discussionTurnCount || 0) + 1;
            
            if (game.discussionTurnCount >= game.players.length) {
-             if (game.phase === 'leaderDiscussion') {
-                game.phase = 'missionTeamSelection';
-                game.nominationTimeLeft = 80;
-             } else {
-                finalizeDiscussionPhase(game);
-             }
+             finalizeDiscussionPhase(game);
            } else {
              game.currentPlayerIndex = (game.currentPlayerIndex + 1) % game.players.length;
              game.discussionTimeLeft = 40;
@@ -484,15 +470,17 @@ wss.on('connection', (ws) => {
               else if (c === max) { winners.push(name); }
             }
             if (winners.length === 0) {
-              const fallback = game.players[game.currentLeaderIndex]?.name;
+              const fallback = game.players[game.currentPlayerIndex]?.name || game.players[game.currentLeaderIndex]?.name;
               winners = [fallback];
             }
 
             if (winners.length > 1) {
+              // TIE DETECTED
               if (game.isTieBreakerVote) {
-                  // Tie Breaker: Use starter logic
+                  // Second tie -> Force resolve by starter vote
                   const starter = game.players[game.currentLeaderIndex];
                   const starterVote = game.votes[starter.id];
+                  // If starter voted for one of the tied winners, they win. Else fallback to first winner.
                   const finalWinnerName = winners.includes(starterVote) ? starterVote : winners[0];
                   
                   game.players.forEach(p => p.isLeader = false);
@@ -506,9 +494,13 @@ wss.on('connection', (ws) => {
                   game.discussionTurnCount = 0;
                   game.discussionTimeLeft = 40;
               } else {
+                  // First tie -> Go to tie discussion
                   game.tieCandidates = winners;
                   game.phase = 'tieDiscussion';
-                  game.tieTimeLeft = 30 * winners.length;
+                  game.tieTimeLeft = 30 * winners.length; // Total time? Or per person? 
+                  // Prompt says "поочередно дается по 30 секунд". 
+                  // We'll simplify server side: give total time block, client logic handles turns or just open floor.
+                  // For simplicity in this text-based interaction, let's just give a block of time.
                   game.isTieBreakerVote = true;
               }
             } else {
@@ -528,6 +520,25 @@ wss.on('connection', (ws) => {
           broadcastGameState(room.id);
         }
         return;
+      }
+
+      if (a.name === 'passTurnLeaderDiscussion') {
+         const isCurrentPlayer = game.players[game.currentPlayerIndex].id === user.id;
+         const isHost = room.hostId === user.id;
+         
+         if (isCurrentPlayer || isHost) {
+            game.discussionTurnCount = (game.discussionTurnCount || 0) + 1;
+            
+            if (game.discussionTurnCount >= game.players.length) {
+              game.phase = 'missionTeamSelection';
+              game.nominationTimeLeft = 80;
+            } else {
+              game.currentPlayerIndex = (game.currentPlayerIndex + 1) % game.players.length;
+              game.discussionTimeLeft = 40;
+            }
+            broadcastGameState(room.id);
+         }
+         return;
       }
 
       if (a.name === 'startMissionTeamSelection') {
