@@ -18,426 +18,660 @@ app.use(express.static(__dirname));
 const server = http.createServer(app);
 const wss = new WebSocketServer({ server });
 
-// --- Data ---
-const rooms = new Map();
-const sockets = new Map();
+// In-memory state
+const rooms = new Map(); // roomId -> { id, name, hostId, hostName, maxPlayers, passwordHash?, createdAt, players: Map<playerId, player>, game?: {...} }
+const sockets = new Map(); // socket -> { id, name, roomId? }
 
-// --- Constants ---
-const MISSION_SIZES = {
-    5: [2, 3, 2, 3, 3],
-    6: [2, 3, 4, 3, 4],
-    7: [2, 3, 3, 4, 4], // Mission 4 (idx 3) requires 2 fails
-    8: [3, 4, 4, 5, 5], // Mission 4 (idx 3) requires 2 fails
-    9: [3, 4, 4, 5, 5]  // Mission 4 (idx 3) requires 2 fails
-};
-
-const SPY_COUNTS = { 5: 2, 6: 2, 7: 3, 8: 3, 9: 3 };
-
-// --- Game Logic ---
-function initGame(room) {
-    const players = Array.from(room.players.values());
-    const count = players.length;
-    const spyCount = SPY_COUNTS[count] || 2;
-    
-    // Roles
-    const shuffled = [...players].sort(() => Math.random() - 0.5);
-    const spies = new Set(shuffled.slice(0, spyCount).map(p => p.id));
-    
-    let spyIdx = 1;
-    players.forEach(p => {
-        p.role = spies.has(p.id) ? 'spy' : 'resistance';
-        p.spyNumber = spies.has(p.id) ? spyIdx++ : null;
-        p.isLeader = false;
-        p.confirmedRole = false; // New: track confirmation
-        p.voted = false;
-        p.missionVote = null;
-    });
-
-    const leaderIdx = Math.floor(Math.random() * count);
-    players[leaderIdx].isLeader = true;
-
-    room.game = {
-        players: players.map(p => ({ ...p })),
-        phase: 'roleReveal', // Start with Role Reveal
-        currentMission: 1,
-        missionSizes: MISSION_SIZES[count] || MISSION_SIZES[5],
-        successfulMissions: 0,
-        failedMissions: 0,
-        currentLeaderIndex: leaderIdx,
-        currentPlayerIndex: leaderIdx,
-        discussionTurnCount: 0,
-        
-        discussionTimeLeft: 40,
-        nominationTimeLeft: 80,
-        tieTimeLeft: 0,
-        
-        nominatedPlayers: [],
-        votes: {},
-        missionTeam: [],
-        missionVotes: {},
-        missionResults: [],
-        tieCandidates: [],
-        isTieBreakerVote: false,
-        
-        gameOver: false,
-        winner: null
-    };
+function cleanRoomIfEmpty(roomId) {
+  const room = rooms.get(roomId);
+  if (!room) return;
+  if (room.players.size === 0) {
+    rooms.delete(roomId);
+  }
 }
 
-function checkAllRolesConfirmed(game) {
-    if (game.players.every(p => p.confirmedRole)) {
-        game.phase = 'discussion';
-        game.discussionTimeLeft = 40;
-        return true;
+function publicRoomInfo(room) {
+  return {
+    id: room.id,
+    name: room.name,
+    host: room.hostName,
+    hostId: room.hostId,
+    players: room.players.size,
+    maxPlayers: room.maxPlayers,
+    hasPassword: !!room.password,
+    createdAt: room.createdAt
+  };
+}
+
+function broadcastLobby() {
+  const list = Array.from(rooms.values()).map(publicRoomInfo);
+  for (const [ws, user] of sockets.entries()) {
+    try {
+      ws.send(JSON.stringify({ type: 'lobby', rooms: list }));
+    } catch (e) {}
+  }
+}
+
+function broadcastToRoomRaw(roomId, payload) {
+  for (const [ws, user] of sockets.entries()) {
+    if (user.roomId === roomId) {
+      try { ws.send(JSON.stringify(payload)); } catch (e) {}
     }
-    return false;
+  }
 }
 
-function nextMission(game) {
-    game.currentMission++;
-    game.players.forEach(p => {
-        p.nominated = false;
-        p.voted = false;
-        p.missionVote = null;
-        p.isLeader = false;
-    });
-    game.nominatedPlayers = [];
-    game.votes = {};
-    game.missionTeam = [];
-    game.missionVotes = {};
-    game.tieCandidates = [];
-    game.isTieBreakerVote = false;
+function broadcastGameState(roomId) {
+  const room = rooms.get(roomId);
+  if (!room || !room.game) return;
 
-    const nextIdx = (game.currentLeaderIndex + 1) % game.players.length;
-    game.currentLeaderIndex = nextIdx;
-    game.players[nextIdx].isLeader = true;
-    
-    game.phase = 'discussion';
-    game.currentPlayerIndex = nextIdx;
-    game.discussionTimeLeft = 40;
-    game.discussionTurnCount = 0;
+  const spies = room.game.players.filter(p => p.role === 'spy');
+  const spyPublic = spies.map(s => ({ id: s.id, name: s.name, spyNumber: s.spyNumber }));
+
+  for (const [ws, user] of sockets.entries()) {
+    if (user.roomId === roomId) {
+      const me = room.game.players.find(p => p.id === user.id);
+      const isSpy = me?.role === 'spy';
+      const safeGame = safeGameForClient(room.game, user.id, isSpy, spyPublic);
+      
+      const payload = { type: 'game', game: safeGame, you: me };
+      if (isSpy) payload.spies = spyPublic;
+      
+      try { ws.send(JSON.stringify(payload)); } catch (e) {}
+    }
+  }
 }
 
-function finalizeDiscussion(game) {
-    const candidates = game.nominatedPlayers;
-    game.players.forEach(p => p.isLeader = false);
+function getMissionSizes(count) {
+  switch (parseInt(count)) {
+    case 5: return [2,3,2,3,3];
+    case 6: return [2,3,4,3,4];
+    case 7: return [2,3,4,3,4];
+    case 8: return [3,4,5,4,5];
+    case 9: return [3,4,4,5,5];
+    default: return [2,3,4,3,4];
+  }
+}
 
-    if (candidates.length === 0) {
-        // Fallback to starter
-        const starter = game.players[game.currentLeaderIndex];
-        starter.isLeader = true;
-        game.phase = 'leaderDiscussion';
-        game.discussionTimeLeft = 40;
-        game.currentPlayerIndex = game.currentLeaderIndex;
-        game.discussionTurnCount = 0;
-    } else if (candidates.length === 1) {
-        // Auto-win
-        const winner = game.players.find(p => p.name === candidates[0]);
-        if (winner) winner.isLeader = true;
-        game.currentLeaderIndex = game.players.indexOf(winner);
-        
-        game.phase = 'leaderDiscussion';
-        game.discussionTimeLeft = 40;
-        game.currentPlayerIndex = game.currentLeaderIndex;
-        game.discussionTurnCount = 0;
+function getSpyCount(count) {
+  switch (parseInt(count)) {
+    case 5: return 2;
+    case 6: return 2;
+    case 7: return 3;
+    case 8: return 3;
+    case 9: return 3;
+    default: return 2;
+  }
+}
+
+function assignRoles(playersArr) {
+  const count = playersArr.length;
+  const spyCount = getSpyCount(count);
+  const shuffled = [...playersArr].sort(() => Math.random() - 0.5);
+  const spies = new Set(shuffled.slice(0, spyCount).map(p => p.id));
+  let spyNumber = 1;
+  for (const p of playersArr) {
+    if (spies.has(p.id)) {
+      p.role = 'spy';
+      p.spyNumber = spyNumber++;
     } else {
-        game.phase = 'voting';
-        game.votes = {};
-        game.players.forEach(p => p.voted = false);
+      p.role = 'resistance';
+      p.spyNumber = null;
     }
+    p.isLeader = false;
+    p.nominated = false;
+    p.voted = false;
+    p.missionVote = null;
+  }
 }
 
-// --- Loop ---
+function initGame(room) {
+  const playersArr = Array.from(room.players.values());
+  assignRoles(playersArr);
+
+  const missionSizes = getMissionSizes(playersArr.length);
+  const startingIndex = Math.floor(Math.random() * playersArr.length);
+  playersArr[startingIndex].isLeader = true;
+
+  room.game = {
+    players: playersArr.map(p => ({
+      id: p.id,
+      name: p.name,
+      role: p.role,
+      spyNumber: p.spyNumber,
+      isLeader: p.isLeader,
+      nominated: false,
+      voted: false,
+      missionVote: null
+    })),
+    currentMission: 1,
+    missionSizes,
+    successfulMissions: 0,
+    failedMissions: 0,
+    currentLeaderIndex: startingIndex,
+    currentPlayerIndex: startingIndex,
+    discussionTurnCount: 0,
+    phase: 'discussion',
+    discussionTimeLeft: 40,
+    nominationTimeLeft: 80,
+    tieTimeLeft: 30,
+    nominatedPlayers: [],
+    votes: {},
+    missionTeam: [],
+    missionVotes: {},
+    missionResults: [],
+    gameOver: false,
+    winner: null,
+    isTieBreakerVote: false,
+    tieCandidates: []
+  };
+}
+
+function safeGameForClient(game, forPlayerId, isViewerSpy, spiesList) {
+  if (!game) return null;
+  const copy = JSON.parse(JSON.stringify(game));
+  copy.players = copy.players.map(p => {
+    if (p.id === forPlayerId) return p;
+    const masked = { ...p, role: 'unknown', spyNumber: null };
+    if (isViewerSpy && spiesList?.some(s => s.id === p.id)) {
+      return masked;
+    }
+    return masked;
+  });
+  return copy;
+}
+
+// Logic to end discussion and transition to next phase
+function finalizeDiscussionPhase(game) {
+  const candidateCount = (game.nominatedPlayers || []).length;
+  game.players.forEach(p => p.isLeader = false); // Clear previous leader flags
+
+  if (candidateCount === 0) {
+      // No candidates: Current leader (starter) becomes leader
+      const fallback = game.players[game.currentLeaderIndex];
+      if (fallback) fallback.isLeader = true;
+      game.phase = 'leaderDiscussion';
+  } else if (candidateCount === 1) {
+      // 1 candidate: Auto-win
+      const winnerName = game.nominatedPlayers[0];
+      const winner = game.players.find(p => p.name === winnerName);
+      if (winner) winner.isLeader = true;
+      game.phase = 'leaderDiscussion';
+  } else {
+      // 2+ candidates: Vote
+      game.phase = 'voting';
+      game.isTieBreakerVote = false;
+  }
+
+  // Init Leader Discussion if transitioned
+  if (game.phase === 'leaderDiscussion') {
+      const leaderIdx = game.players.findIndex(p => p.isLeader);
+      if (leaderIdx !== -1) {
+          game.currentLeaderIndex = leaderIdx;
+          game.currentPlayerIndex = leaderIdx;
+      }
+      game.discussionTurnCount = 0;
+      game.discussionTimeLeft = 40;
+  }
+}
+
+// --- Game Loop for Timers ---
 setInterval(() => {
-    rooms.forEach(room => {
-        if (!room.game || room.game.gameOver) return;
-        const g = room.game;
-        let changed = false;
+  rooms.forEach((room) => {
+    if (!room.game || room.game.gameOver) return;
+    const game = room.game;
+    let changed = false;
 
-        if (g.phase === 'discussion' || g.phase === 'leaderDiscussion') {
-            if (g.discussionTimeLeft > 0) {
-                g.discussionTimeLeft--;
-                changed = true;
-            } else {
-                // Turn over
-                g.discussionTurnCount++;
-                if (g.discussionTurnCount >= g.players.length) {
-                    if (g.phase === 'leaderDiscussion') {
-                        g.phase = 'missionTeamSelection';
-                        g.nominationTimeLeft = 80;
-                    } else {
-                        finalizeDiscussion(g);
-                    }
-                } else {
-                    g.currentPlayerIndex = (g.currentPlayerIndex + 1) % g.players.length;
-                    g.discussionTimeLeft = 40;
-                }
-                changed = true;
-            }
-        } else if (g.phase === 'missionTeamSelection') {
-             if (g.nominationTimeLeft > 0) {
-                 g.nominationTimeLeft--;
-                 changed = true;
-             } else {
-                 // Timeout -> Fail
-                 g.missionResults.push({ mission: g.currentMission, success: false, failCount: 0, successCount: 0 });
-                 g.failedMissions++;
-                 if (g.failedMissions >= 3) { g.gameOver = true; g.winner = 'spy'; g.phase = 'missionResults'; }
-                 else nextMission(g);
-                 changed = true;
-             }
-        } else if (g.phase === 'tieDiscussion') {
-            if (g.tieTimeLeft > 0) {
-                g.tieTimeLeft--;
-                changed = true;
-            } else {
-                g.phase = 'voting';
-                g.players.forEach(p => p.voted = false);
-                g.votes = {};
-                changed = true;
-            }
+    // Timer logic
+    if (game.phase === 'discussion') {
+      if (game.discussionTimeLeft > 0) {
+        game.discussionTimeLeft--;
+        changed = true;
+      } else {
+        game.discussionTurnCount = (game.discussionTurnCount || 0) + 1;
+        if (game.discussionTurnCount >= game.players.length) {
+            finalizeDiscussionPhase(game);
+        } else {
+            game.currentPlayerIndex = (game.currentPlayerIndex + 1) % game.players.length;
+            game.discussionTimeLeft = 40;
         }
-
-        if (changed) broadcastGameState(room);
+        changed = true;
+      }
+    } else if (game.phase === 'leaderDiscussion') {
+        if (game.discussionTimeLeft > 0) {
+          game.discussionTimeLeft--;
+          changed = true;
+        } else {
+          game.discussionTurnCount = (game.discussionTurnCount || 0) + 1;
+          if (game.discussionTurnCount >= game.players.length) {
+              game.phase = 'missionTeamSelection';
+              game.nominationTimeLeft = 80;
+          } else {
+              game.currentPlayerIndex = (game.currentPlayerIndex + 1) % game.players.length;
+              game.discussionTimeLeft = 40;
+          }
+          changed = true;
+        }
+    } else if (game.phase === 'missionTeamSelection') {
+      if (game.nominationTimeLeft > 0) {
+        game.nominationTimeLeft--;
+        changed = true;
+      } else {
+        game.missionResults.push({ 
+            mission: game.currentMission, 
+            success: false, 
+            failCount: 0, 
+            note: 'Время вышло' 
+        });
+        game.failedMissions++;
         
-        // Ping KeepAlive
-        wss.clients.forEach(ws => { if(ws.isAlive) ws.ping(); });
-    });
+        if (game.failedMissions >= 3) {
+            game.gameOver = true;
+            game.winner = 'spy';
+            game.phase = 'missionResults';
+        } else {
+            game.currentMission++;
+            game.players.forEach(p => { 
+                p.nominated = false; 
+                p.voted = false; 
+                p.missionVote = null; 
+                p.isLeader = false; 
+            });
+            game.nominatedPlayers = [];
+            game.votes = {};
+            game.missionTeam = [];
+            game.missionVotes = {};
+
+            const nextIndex = (game.currentLeaderIndex + 1) % game.players.length;
+            game.players[nextIndex].isLeader = true;
+            game.currentLeaderIndex = nextIndex;
+            game.currentPlayerIndex = nextIndex;
+            game.discussionTurnCount = 0;
+            
+            game.phase = 'discussion';
+            game.discussionTimeLeft = 40;
+        }
+        changed = true;
+      }
+    } else if (game.phase === 'tieDiscussion') {
+      if (game.tieTimeLeft > 0) {
+        game.tieTimeLeft--;
+        changed = true;
+      } else {
+        game.players.forEach(p => p.voted = false);
+        game.votes = {};
+        game.phase = 'voting';
+        // IMPORTANT: We do NOT reset isTieBreakerVote here, it remains true
+        changed = true;
+      }
+    }
+
+    if (changed) {
+      broadcastGameState(room.id);
+    }
+  });
 }, 1000);
 
-// --- Networking ---
-function broadcastLobby() {
-    const list = Array.from(rooms.values()).map(r => ({
-        id: r.id, name: r.name, host: r.hostName, players: r.players.size, maxPlayers: r.maxPlayers, hasPassword: !!r.password
-    }));
-    const msg = JSON.stringify({ type: 'lobby', rooms: list });
-    wss.clients.forEach(c => { if (c.readyState === 1) c.send(msg); });
-}
+wss.on('connection', (ws) => {
+  const user = { id: null, name: null, roomId: null };
+  sockets.set(ws, user);
 
-function broadcastRoom(room) {
-    const msg = JSON.stringify({
-        type: 'room',
-        room: {
-            id: room.id, name: room.name, hostId: room.hostId, maxPlayers: room.maxPlayers, inviteKey: room.inviteKey,
-            players: Array.from(room.players.values())
+  ws.on('message', (msg) => {
+    let data = null;
+    try { data = JSON.parse(msg); } catch (e) { return; }
+
+    if (data.type === 'hello') {
+      user.id = data.userId || nanoid();
+      user.name = data.name || `Игрок-${user.id.slice(0,4)}`;
+      ws.send(JSON.stringify({ type: 'lobby', rooms: Array.from(rooms.values()).map(publicRoomInfo), you: { id: user.id, name: user.name } }));
+      return;
+    }
+
+    if (data.type === 'createRoom') {
+      const { name, maxPlayers, password } = data;
+      const roomId = nanoid(10);
+      const inviteKey = nanoid(8);
+      const room = {
+        id: roomId,
+        inviteKey,
+        name: name || `Игра ${user.name}`,
+        hostId: user.id,
+        hostName: user.name,
+        maxPlayers: Math.max(5, Math.min(9, parseInt(maxPlayers) || 8)),
+        password: password ? String(password) : null,
+        createdAt: Date.now(),
+        players: new Map()
+      };
+      rooms.set(roomId, room);
+      room.players.set(user.id, { id: user.id, name: user.name });
+      user.roomId = roomId;
+      broadcastLobby();
+      broadcastToRoomRaw(roomId, { type: 'room', room: { ...publicRoomInfo(room), inviteKey }, players: Array.from(room.players.values()) });
+      return;
+    }
+
+    if (data.type === 'joinRoom') {
+      const room = rooms.get(data.roomId);
+      if (!room) { ws.send(JSON.stringify({ type: 'error', message: 'Комната не найдена' })); return; }
+      if (room.players.size >= room.maxPlayers) { ws.send(JSON.stringify({ type: 'error', message: 'Комната заполнена' })); return; }
+      
+      const hasInvite = data.inviteKey && room.inviteKey && (String(data.inviteKey) === String(room.inviteKey));
+      if (!hasInvite && room.password && room.password !== (data.password || '')) { 
+          ws.send(JSON.stringify({ type: 'error', message: 'Неверный пароль' })); 
+          return; 
+      }
+      
+      room.players.set(user.id, { id: user.id, name: user.name });
+      user.roomId = room.id;
+      broadcastLobby();
+      broadcastToRoomRaw(room.id, { type: 'room', room: { ...publicRoomInfo(room), inviteKey: room.inviteKey }, players: Array.from(room.players.values()) });
+      return;
+    }
+
+    if (data.type === 'leaveRoom') {
+      const room = rooms.get(user.roomId);
+      if (room) {
+        room.players.delete(user.id);
+        broadcastToRoomRaw(room.id, { type: 'room', room: publicRoomInfo(room), players: Array.from(room.players.values()) });
+        if (room.hostId === user.id) {
+          const next = Array.from(room.players.values())[0];
+          if (next) {
+            room.hostId = next.id;
+            room.hostName = next.name;
+          }
         }
-    });
-    room.players.forEach((_, id) => {
-        const ws = Array.from(sockets.entries()).find(([, u]) => u.id === id)?.[0];
-        if (ws && ws.readyState === 1) ws.send(msg);
-    });
-}
+        if (room.players.size === 0) rooms.delete(room.id);
+      }
+      user.roomId = null;
+      broadcastLobby();
+      return;
+    }
 
-function broadcastGameState(room) {
-    if (!room.game) return;
-    const spies = room.game.players.filter(p => p.role === 'spy').map(p => ({ id: p.id, name: p.name, spyNumber: p.spyNumber }));
-    
-    room.game.players.forEach(p => {
-        const ws = Array.from(sockets.entries()).find(([, u]) => u.id === p.id)?.[0];
-        if (ws && ws.readyState === 1) {
-            const safeGame = { ...room.game };
-            safeGame.players = safeGame.players.map(pl => {
-                if (pl.id === p.id) return pl;
-                return { ...pl, role: 'unknown', spyNumber: null, missionVote: null };
-            });
-            const msg = { type: 'game', game: safeGame, you: p };
-            if (p.role === 'spy') msg.spies = spies;
-            ws.send(JSON.stringify(msg));
+    if (data.type === 'getLobby') {
+      ws.send(JSON.stringify({ type: 'lobby', rooms: Array.from(rooms.values()).map(publicRoomInfo) }));
+      return;
+    }
+
+    if (data.type === 'startGame') {
+      const room = rooms.get(user.roomId);
+      if (!room) return;
+      if (room.hostId !== user.id) return;
+      if (room.players.size < 5) { ws.send(JSON.stringify({ type: 'error', message: 'Нужно минимум 5 игроков' })); return; }
+      initGame(room);
+      broadcastGameState(room.id);
+      broadcastToRoomRaw(room.id, { type: 'room', room: { ...publicRoomInfo(room), inviteKey: room.inviteKey }, players: Array.from(room.players.values()) });
+      return;
+    }
+
+    if (data.type === 'action' && user.roomId) {
+      const room = rooms.get(user.roomId);
+      if (!room || !room.game) return;
+      const game = room.game;
+      const me = game.players.find(p => p.id === user.id);
+      if (!me) return;
+
+      const a = data.action;
+
+      if (a.name === 'passTurn') {
+        const isCurrentPlayer = game.players[game.currentPlayerIndex].id === user.id;
+        const isHost = room.hostId === user.id;
+        
+        if (isCurrentPlayer || isHost) {
+           game.discussionTurnCount = (game.discussionTurnCount || 0) + 1;
+           
+           if (game.discussionTurnCount >= game.players.length) {
+             finalizeDiscussionPhase(game);
+           } else {
+             game.currentPlayerIndex = (game.currentPlayerIndex + 1) % game.players.length;
+             game.discussionTimeLeft = 40;
+           }
+           broadcastGameState(room.id);
         }
-    });
-}
+        return;
+      }
 
-wss.on('connection', ws => {
-    ws.isAlive = true;
-    ws.on('pong', () => ws.isAlive = true);
-    
-    const user = { id: null, name: null, roomId: null };
-    sockets.set(ws, user);
+      if (a.name === 'nominateSelf') {
+        if (!me.nominated) {
+          me.nominated = true;
+          if (!game.nominatedPlayers.includes(me.name)) game.nominatedPlayers.push(me.name);
+          broadcastGameState(room.id);
+        }
+        return;
+      }
 
-    ws.on('message', raw => {
-        try {
-            const data = JSON.parse(raw);
+      if (a.name === 'nominateOther') {
+        const other = game.players.find(p => p.name === a.playerName);
+        if (other && !game.nominatedPlayers.includes(other.name)) {
+          game.nominatedPlayers.push(other.name);
+          broadcastGameState(room.id);
+        }
+        return;
+      }
+
+      if (a.name === 'removeNomination') {
+        game.nominatedPlayers = game.nominatedPlayers.filter(n => n !== a.playerName);
+        const p = game.players.find(p => p.name === a.playerName);
+        if (p) p.nominated = false;
+        broadcastGameState(room.id);
+        return;
+      }
+
+      if (a.name === 'voteForLeader') {
+        if (!me.voted) {
+          me.voted = true;
+          game.votes[me.id] = a.playerName;
+          const allVoted = game.players.every(p => p.voted);
+          
+          if (allVoted) {
+            const counts = {};
+            for (const name of Object.values(game.votes)) counts[name] = (counts[name] || 0) + 1;
+            let max = 0; let winners = [];
+            for (const [name, c] of Object.entries(counts)) {
+              if (c > max) { max = c; winners = [name]; }
+              else if (c === max) { winners.push(name); }
+            }
+            if (winners.length === 0) {
+              const fallback = game.players[game.currentPlayerIndex]?.name || game.players[game.currentLeaderIndex]?.name;
+              winners = [fallback];
+            }
+
+            if (winners.length > 1) {
+              // TIE DETECTED
+              if (game.isTieBreakerVote) {
+                  // Second tie -> Force resolve by starter vote
+                  const starter = game.players[game.currentLeaderIndex];
+                  const starterVote = game.votes[starter.id];
+                  // If starter voted for one of the tied winners, they win. Else fallback to first winner.
+                  const finalWinnerName = winners.includes(starterVote) ? starterVote : winners[0];
+                  
+                  game.players.forEach(p => p.isLeader = false);
+                  const leader = game.players.find(p => p.name === finalWinnerName);
+                  if (leader) leader.isLeader = true;
+                  
+                  game.phase = 'leaderDiscussion';
+                  const leaderIdx = game.players.indexOf(leader);
+                  game.currentLeaderIndex = leaderIdx;
+                  game.currentPlayerIndex = leaderIdx;
+                  game.discussionTurnCount = 0;
+                  game.discussionTimeLeft = 40;
+              } else {
+                  // First tie -> Go to tie discussion
+                  game.tieCandidates = winners;
+                  game.phase = 'tieDiscussion';
+                  game.tieTimeLeft = 30 * winners.length; // Total time? Or per person? 
+                  // Prompt says "поочередно дается по 30 секунд". 
+                  // We'll simplify server side: give total time block, client logic handles turns or just open floor.
+                  // For simplicity in this text-based interaction, let's just give a block of time.
+                  game.isTieBreakerVote = true;
+              }
+            } else {
+              const winName = winners[0];
+              game.players.forEach(p => p.isLeader = false);
+              const leader = game.players.find(p => p.name === winName);
+              if (leader) {
+                leader.isLeader = true;
+                game.currentLeaderIndex = game.players.indexOf(leader);
+                game.currentPlayerIndex = game.currentLeaderIndex;
+                game.discussionTurnCount = 0;
+                game.phase = 'leaderDiscussion';
+                game.discussionTimeLeft = 40;
+              }
+            }
+          }
+          broadcastGameState(room.id);
+        }
+        return;
+      }
+
+      if (a.name === 'passTurnLeaderDiscussion') {
+         const isCurrentPlayer = game.players[game.currentPlayerIndex].id === user.id;
+         const isHost = room.hostId === user.id;
+         
+         if (isCurrentPlayer || isHost) {
+            game.discussionTurnCount = (game.discussionTurnCount || 0) + 1;
             
-            if (data.type === 'hello') {
-                user.id = data.userId || nanoid();
-                user.name = data.name || 'Player';
-                broadcastLobby();
-            } else if (data.type === 'createRoom') {
-                const roomId = nanoid(6);
-                const room = {
-                    id: roomId, name: data.name, password: data.password, maxPlayers: data.maxPlayers,
-                    hostId: user.id, hostName: user.name, inviteKey: nanoid(8), players: new Map(), game: null
-                };
-                room.players.set(user.id, { id: user.id, name: user.name });
-                rooms.set(roomId, room);
-                user.roomId = roomId;
-                broadcastLobby();
-                broadcastRoom(room);
-            } else if (data.type === 'joinRoom') {
-                const room = rooms.get(data.roomId);
-                if (room) {
-                    if (room.players.size < room.maxPlayers) {
-                         if (room.inviteKey === data.inviteKey || !room.password || room.password === data.password) {
-                             room.players.set(user.id, { id: user.id, name: user.name });
-                             user.roomId = room.id;
-                             broadcastLobby();
-                             broadcastRoom(room);
-                             if (room.game) broadcastGameState(room);
-                         } else ws.send(JSON.stringify({type:'error', message:'Неверный пароль'}));
-                    } else ws.send(JSON.stringify({type:'error', message:'Комната полна'}));
-                }
-            } else if (data.type === 'leaveRoom') {
-                const room = rooms.get(user.roomId);
-                if (room) {
-                    room.players.delete(user.id);
-                    if (room.players.size === 0) rooms.delete(room.id);
-                    else {
-                        if (room.hostId === user.id) {
-                            const next = room.players.values().next().value;
-                            room.hostId = next.id;
-                            room.hostName = next.name;
-                        }
-                        broadcastRoom(room);
-                    }
-                    user.roomId = null;
-                    broadcastLobby();
-                }
-            } else if (data.type === 'startGame') {
-                const room = rooms.get(user.roomId);
-                if (room && room.hostId === user.id && room.players.size >= 5) {
-                    initGame(room);
-                    broadcastGameState(room);
-                }
-            } else if (data.type === 'action') {
-                const room = rooms.get(user.roomId);
-                if (room && room.game) {
-                    const act = data.action;
-                    const game = room.game;
-                    const me = game.players.find(p => p.id === user.id);
-                    
-                    if (act.name === 'confirmRole' && game.phase === 'roleReveal') {
-                        me.confirmedRole = true;
-                        if (checkAllRolesConfirmed(game)) broadcastGameState(room);
-                        else broadcastGameState(room); // Update status
-                    }
-                    else if (act.name === 'passTurn' || act.name === 'passTurnLeaderDiscussion') {
-                        if (game.players[game.currentPlayerIndex].id === user.id || room.hostId === user.id) {
-                            game.discussionTimeLeft = 0; // Force timer end
-                        }
-                    } else if (act.name === 'nominate') {
-                        if (game.phase === 'discussion' || game.phase === 'nomination') {
-                            if (game.nominatedPlayers.includes(act.target)) {
-                                game.nominatedPlayers = game.nominatedPlayers.filter(n => n !== act.target);
-                            } else {
-                                game.nominatedPlayers.push(act.target);
-                            }
-                            broadcastGameState(room);
-                        }
-                    } else if (act.name === 'voteForLeader' && game.phase === 'voting' && !me.voted) {
-                        if (game.tieCandidates.length > 0 && !game.tieCandidates.includes(act.candidate)) return;
-                        me.voted = true;
-                        game.votes[me.id] = act.candidate;
-                        if (game.players.every(p => p.voted)) {
-                            // Process Votes
-                            const counts = {};
-                            Object.values(game.votes).forEach(v => counts[v] = (counts[v]||0)+1);
-                            let max = 0;
-                            Object.values(counts).forEach(c => max = Math.max(max, c));
-                            const winners = Object.keys(counts).filter(c => counts[c] === max);
-                            
-                            if (winners.length === 1) {
-                                const w = game.players.find(p => p.name === winners[0]);
-                                game.players.forEach(p => p.isLeader = false);
-                                w.isLeader = true;
-                                game.currentLeaderIndex = game.players.indexOf(w);
-                                game.phase = 'leaderDiscussion';
-                                game.currentPlayerIndex = game.currentLeaderIndex;
-                                game.discussionTimeLeft = 40;
-                                game.discussionTurnCount = 0;
-                                game.tieCandidates = [];
-                                game.isTieBreakerVote = false;
-                            } else {
-                                if (game.isTieBreakerVote) {
-                                    // Auto resolve (first winner or starter choice)
-                                    const starter = game.players[game.currentLeaderIndex];
-                                    const sv = game.votes[starter.id];
-                                    const final = winners.includes(sv) ? sv : winners[0];
-                                    const w = game.players.find(p => p.name === final);
-                                    game.players.forEach(p => p.isLeader = false);
-                                    w.isLeader = true;
-                                    game.currentLeaderIndex = game.players.indexOf(w);
-                                    game.phase = 'leaderDiscussion';
-                                    game.currentPlayerIndex = game.currentLeaderIndex;
-                                    game.discussionTimeLeft = 40;
-                                    game.discussionTurnCount = 0;
-                                    game.tieCandidates = [];
-                                    game.isTieBreakerVote = false;
-                                } else {
-                                    game.tieCandidates = winners;
-                                    game.phase = 'tieDiscussion';
-                                    game.tieTimeLeft = 30 * winners.length;
-                                    game.isTieBreakerVote = true;
-                                }
-                            }
-                        }
-                        broadcastGameState(room);
-                    } else if (act.name === 'toggleTeamMember' && game.phase === 'missionTeamSelection' && me.isLeader) {
-                        if (game.missionTeam.includes(act.target)) game.missionTeam = game.missionTeam.filter(t => t !== act.target);
-                        else if (game.missionTeam.length < game.missionSizes[game.currentMission-1]) game.missionTeam.push(act.target);
-                        broadcastGameState(room);
-                    } else if (act.name === 'approveTeam' && game.phase === 'missionTeamSelection' && me.isLeader) {
-                        if (game.missionTeam.length === game.missionSizes[game.currentMission-1]) {
-                            game.phase = 'missionVoting';
-                            broadcastGameState(room);
-                        }
-                    } else if (act.name === 'voteForMission' && game.phase === 'missionVoting' && game.missionTeam.includes(me.name) && !me.missionVote) {
-                        if (me.role === 'resistance' && act.vote === 'fail') return;
-                        me.missionVote = act.vote;
-                        game.missionVotes[me.id] = act.vote;
-                        
-                        if (Object.keys(game.missionVotes).length === game.missionTeam.length) {
-                            let fails = 0;
-                            Object.values(game.missionVotes).forEach(v => { if (v === 'fail') fails++; });
-                            const success = (game.currentMission === 4 && game.players.length >= 7) ? fails < 2 : fails === 0;
-                            
-                            game.missionResults.push({ mission: game.currentMission, success, failCount: fails, successCount: game.missionTeam.length - fails });
-                            if (success) game.successfulMissions++; else game.failedMissions++;
-                            
-                            if (game.successfulMissions >= 3) { game.gameOver = true; game.winner = 'resistance'; }
-                            else if (game.failedMissions >= 3) { game.gameOver = true; game.winner = 'spy'; }
-                            
-                            game.phase = 'missionResults';
-                        }
-                        broadcastGameState(room);
-                    } else if (act.name === 'nextMission' && game.phase === 'missionResults') {
-                        nextMission(game);
-                        broadcastGameState(room);
-                    }
-                }
+            if (game.discussionTurnCount >= game.players.length) {
+              game.phase = 'missionTeamSelection';
+              game.nominationTimeLeft = 80;
+            } else {
+              game.currentPlayerIndex = (game.currentPlayerIndex + 1) % game.players.length;
+              game.discussionTimeLeft = 40;
             }
-        } catch(e) { console.error(e); }
-    });
-    
-    ws.on('close', () => {
-        const u = sockets.get(ws);
-        if (u && u.roomId) {
-            const r = rooms.get(u.roomId);
-            if (r) {
-                r.players.delete(u.id);
-                if (r.players.size === 0) rooms.delete(r.id);
-                else {
-                     if (r.hostId === u.id) {
-                         const next = r.players.values().next().value;
-                         if (next) { r.hostId = next.id; r.hostName = next.name; }
-                     }
-                     broadcastRoom(r);
-                }
-            }
-            broadcastLobby();
+            broadcastGameState(room.id);
+         }
+         return;
+      }
+
+      if (a.name === 'startMissionTeamSelection') {
+        if (me.isLeader) {
+          game.phase = 'missionTeamSelection';
+          game.nominationTimeLeft = 80;
+          broadcastGameState(room.id);
         }
-        sockets.delete(ws);
-    });
+        return;
+      }
+
+      if (a.name === 'addToMissionTeam') {
+        if (me.isLeader) {
+          const missionSize = game.missionSizes[game.currentMission - 1];
+          if (!game.missionTeam.includes(a.playerName) && game.missionTeam.length < missionSize) {
+            game.missionTeam.push(a.playerName);
+            broadcastGameState(room.id);
+          }
+        }
+        return;
+      }
+
+      if (a.name === 'removeFromMissionTeam') {
+        if (me.isLeader) {
+          game.missionTeam = game.missionTeam.filter(n => n !== a.playerName);
+          broadcastGameState(room.id);
+        }
+        return;
+      }
+
+      if (a.name === 'resetMissionTeam') {
+        if (me.isLeader) {
+          game.missionTeam = [];
+          broadcastGameState(room.id);
+        }
+        return;
+      }
+
+      if (a.name === 'approveMissionTeam') {
+        if (me.isLeader) {
+          const missionSize = game.missionSizes[game.currentMission - 1];
+          if (game.missionTeam.length === missionSize) {
+            game.phase = 'missionVoting';
+            broadcastGameState(room.id);
+          }
+        }
+        return;
+      }
+
+      if (a.name === 'voteForMission') {
+        const isInMission = game.missionTeam.includes(me.name);
+        if (!isInMission) return;
+        if (me.missionVote === null) {
+          me.missionVote = a.vote;
+          game.missionVotes[me.id] = a.vote;
+          const participants = game.players.filter(p => game.missionTeam.includes(p.name));
+          const allVoted = participants.every(p => p.missionVote !== null);
+          if (allVoted) {
+            let successCount = 0, failCount = 0;
+            for (const p of participants) {
+              if (p.missionVote === 'success') successCount++; else if (p.missionVote === 'fail') failCount++;
+            }
+            const playerCount = game.players.length;
+            const isMission3 = game.currentMission === 3;
+            const needsTwoFails = isMission3 && [7,8,9].includes(playerCount);
+            const missionSuccess = needsTwoFails ? (failCount < 2) : (failCount === 0);
+
+            game.missionResults.push({ mission: game.currentMission, success: missionSuccess, successCount, failCount });
+            if (missionSuccess) game.successfulMissions++; else game.failedMissions++;
+            
+            if (game.successfulMissions >= 3 || game.failedMissions >= 3) {
+              game.gameOver = true;
+              game.winner = game.successfulMissions >= 3 ? 'resistance' : 'spy';
+            }
+            game.phase = 'missionResults';
+          }
+          broadcastGameState(room.id);
+        }
+        return;
+      }
+
+      if (a.name === 'startNextMission') {
+        game.currentMission++;
+        game.players.forEach(p => { p.nominated = false; p.voted = false; p.missionVote = null; p.isLeader = false; });
+        game.nominatedPlayers = [];
+        game.votes = {};
+        game.missionTeam = [];
+        game.missionVotes = {};
+        game.isTieBreakerVote = false;
+        game.tieCandidates = [];
+
+        const nextIndex = (game.currentLeaderIndex + 1) % game.players.length;
+        game.players[nextIndex].isLeader = true;
+        game.currentLeaderIndex = nextIndex;
+        game.currentPlayerIndex = nextIndex; 
+        game.discussionTurnCount = 0;
+        game.phase = 'discussion';
+        game.discussionTimeLeft = 40;
+        broadcastGameState(room.id);
+        return;
+      }
+
+      if (a.name === 'tieRevote') {
+        game.players.forEach(p => p.voted = false);
+        game.votes = {};
+        game.phase = 'voting';
+        broadcastGameState(room.id);
+        return;
+      }
+    }
+  });
+
+  ws.on('close', () => {
+    const u = sockets.get(ws);
+    if (u) {
+      const room = rooms.get(u.roomId);
+      if (room) {
+        room.players.delete(u.id);
+        broadcastToRoomRaw(room.id, { type: 'room', room: publicRoomInfo(room), players: Array.from(room.players.values()) });
+        cleanRoomIfEmpty(u.roomId);
+      }
+      sockets.delete(ws);
+    }
+  });
 });
 
+app.get('/api/rooms', (req, res) => {
+  res.json(Array.from(rooms.values()).map(publicRoomInfo));
+});
+
+app.get('/health', (req, res) => res.json({ ok: true }));
+
 const PORT = process.env.PORT || 8080;
-server.listen(PORT, '0.0.0.0', () => console.log('Server running on ' + PORT));
+server.listen(PORT, () => {
+  console.log(`Server listening on http://localhost:${PORT}`);
+});
